@@ -2200,6 +2200,28 @@ async function _doSaveToCloud() {
     const currentNow = new Date().toISOString();
     let conflictDetected = false;
     try {
+        // 写入前预检版本：如果云端版本已经变化，直接进入冲突合并，
+        // 避免先把 224KB 整包 PATCH 过去再失败，省下一次完整上传。
+        if (lastKnownUpdatedAt !== 'FRESH') {
+            const { data: _verData, error: _verError } = await supabaseClient.from('MainData')
+                .select('updated_at').eq('id', ROW_ID).single();
+            trackTraffic('mainData', 'version_read', 200);
+            if (!_verError && _verData && _verData.updated_at !== lastKnownUpdatedAt) {
+                console.log('[save] 预检发现云端版本已变化，跳过整包写入，直接进入冲突合并');
+                conflictDetected = true;
+                _hasPendingSave = true;
+                if (!isSilent) _isSilentSave = false;
+                statusEl.innerHTML = `<span style="color:var(--warning); font-weight:bold;">☁️ 冲突解决中，自动合并...</span>`;
+                const resolved = await autoResolveConflict();
+                if (!resolved && !_saveRetryTimer) {
+                    _saveRetryTimer = setTimeout(() => {
+                        _saveRetryTimer = null;
+                        if (_hasPendingSave && !_isSaving) _doSaveToCloud();
+                    }, 3000);
+                }
+                return;
+            }
+        }
         let opResult;
         if (lastKnownUpdatedAt === 'FRESH') {
             opResult = await supabaseClient.from('MainData')
@@ -2267,6 +2289,7 @@ async function autoResolveConflict(showMask = false) {
     try {
         const { data, error } = await supabaseClient.from('MainData').select('content, updated_at').eq('id', ROW_ID).single();
         if (error) throw error;
+        trackTraffic('mainData', 'content_read', JSON.stringify(data && data.content ? data.content : '').length || 0);
         if (data && data.content) {
             latestUpdatedAt = data.updated_at;
             let parsed = data.content;
