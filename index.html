@@ -623,7 +623,7 @@ function windowAmountCentsAfterChange(record, targetWindows, delta) {
 }
 
 function formatMoneyCents(cents) {
-    return (Number(cents) / 100).toFixed(2);
+    return String(Number((Number(cents) / 100).toFixed(2)));
 }
 
 let db = { users: [], unused: [], trash: [], bitTasks: [], bitConnectors: [], bitInventory: [], bitUsernameRegistry: [], operationLogs: [] };
@@ -3006,7 +3006,7 @@ function showRenewalConfirm(record, nextExpiry, amount = null) {
     document.getElementById('renewalConfirmCurrentExpiry').textContent = record.expiry || '-';
     document.getElementById('renewalConfirmNextExpiry').textContent = nextExpiry || '-';
     document.getElementById('renewalConfirmWindows').textContent = String(record.windows || 0);
-    document.getElementById('renewalConfirmAmount').textContent = showPaymentDetails ? `¥${Number(amount).toFixed(2)}` : '';
+    document.getElementById('renewalConfirmAmount').textContent = showPaymentDetails ? `¥${Number(amount)}` : '';
     document.getElementById('renewalConfirmWindowsRow').hidden = !showPaymentDetails;
     document.getElementById('renewalConfirmAmountRow').hidden = !showPaymentDetails;
     const modal = document.getElementById('renewalConfirmModal');
