@@ -1478,19 +1478,22 @@ function bitTaskToRow(job) {
 // 第 1 步：任务写入 bit_tasks 独立表（幂等，失败静默降级——不阻塞页面主流程）
 async function insertBitTaskToCloud(job) {
     if (!job || !job.id) return false;
-    if (!window.supabaseClient) return false;
+    if (typeof supabaseClient === 'undefined' || !supabaseClient) return false;
     const row = bitTaskToRow(job);
     try {
-        const { error } = await window.supabaseClient
+        const body = JSON.stringify(row);
+        trackTraffic('task', 'write', body.length);
+        const { error } = await supabaseClient
             .from('bit_tasks')
             .insert(row);
         if (error) {
-            console.warn('[bit_tasks] 写入失败（降级本地）:', error.message);
+            console.warn('[bit_tasks] 写入失败（降级本地）:', error.message, '| 任务id:', job.id);
             return false;
         }
+        console.log('[bit_tasks] ✅ 写入成功:', job.id, job.action, job.username);
         return true;
     } catch (e) {
-        console.warn('[bit_tasks] 写入异常（降级本地）:', e.message || e);
+        console.warn('[bit_tasks] 写入异常（降级本地）:', e.message || e, '| 任务id:', job.id);
         return false;
     }
 }
