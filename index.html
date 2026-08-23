@@ -292,12 +292,7 @@
 
 <div class="stats-bar" id="statsBar"></div>
 
-<div class="unused-container">
-  <div class="unused-box">
-    <div style="font-size: 12px; color: var(--unused); font-weight: bold;">🔑 待激活名额</div>
-    <div class="unused-list" id="unusedGrid"></div>
-  </div>
-</div>
+<div class="unused-container" id="unusedContainer"></div>
 
 <main class="main-content">
   <div class="table-wrap">
@@ -331,6 +326,7 @@
   <button class="btn btn-ghost" onclick="exportSelected()">📥 导出选中</button>
   <button class="btn" style="background:var(--warning); color:#000;" onclick="batchAction('rollback')">批量回退</button>
   <button class="btn btn-danger" onclick="batchAction('delete')">批量移至回收站</button>
+  <button class="btn btn-success" onclick="batchRenew()">💰 批量续费</button>
   <button class="btn btn-ghost" onclick="cancelSelect()">取消选择</button>
 </div>
 
@@ -359,6 +355,19 @@
   <div class="trash-list-wrap" id="trashList"></div>
 </div>
 
+<div class="modal-overlay" id="batchRenewModal" onclick="if(event.target===this)cancelBatchRenew()">
+  <div class="modal" style="width:min(600px, calc(100vw - 24px)); max-height:calc(100vh - 80px); display:flex; flex-direction:column;">
+    <h3 style="font-size:16px; color:var(--accent); margin-bottom:8px;">批量续费（30 天/位）</h3>
+    <div style="font-size:12px; color:#fff; margin-bottom:10px;">每位置续费 30 天，续费金额按各用户月费叠加合计：</div>
+    <div id="batchRenewList" style="flex:1; overflow-y:auto; max-height:44vh; border:1px solid var(--border); border-radius:6px; padding:6px; background:#000; font-size:12px; line-height:1.8;"></div>
+    <div style="display:flex; justify-content:flex-end; align-items:center; gap:10px; margin-top:14px;">
+      <span style="font-size:13px; color:#fff; margin-right:auto;">合计金额：<strong id="batchRenewTotal" style="color:var(--accent); font-size:16px;"></strong></span>
+      <button class="btn btn-ghost" onclick="cancelBatchRenew()">取消</button>
+      <button class="btn btn-success" onclick="confirmBatchRenew()">确认续费</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="windowChangeModal" onclick="if(event.target===this)closeWindowChangeModal()">
   <div class="modal" style="width:min(540px, calc(100vw - 24px));">
     <h3 style="font-size:16px; color:var(--accent); margin-bottom:8px;">修改窗口</h3>
@@ -385,7 +394,7 @@
       <div class="renewal-confirm-row"><span>当前到期</span><strong id="renewalConfirmCurrentExpiry"></strong></div>
       <div class="renewal-confirm-row next"><span>续费后到期</span><strong id="renewalConfirmNextExpiry"></strong></div>
       <div class="renewal-confirm-row" id="renewalConfirmWindowsRow"><span>窗口</span><strong id="renewalConfirmWindows"></strong></div>
-      <div class="renewal-confirm-row amount" id="renewalConfirmAmountRow"><span>需支付</span><strong id="renewalConfirmAmount"></strong></div>
+      <div class="renewal-confirm-row amount" id="renewalConfirmAmountRow"><span>金额</span><strong id="renewalConfirmAmount"></strong></div>
     </div>
     <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
       <button class="btn btn-ghost" onclick="resolveRenewalConfirm(false)">取消</button>
@@ -423,7 +432,7 @@
 <div class="modal-overlay" id="multiUnusedModal">
   <div class="modal">
     <h3 style="font-size:14px; margin-bottom:10px; color:var(--unused)">批量新增名额</h3>
-    <textarea id="multiUnusedInput" style="width:100%; height:180px; background:#000; border:1px solid var(--border); color:#fff; padding:10px; font-size:12px" placeholder="用户名 密码 (一行一个)"></textarea>
+    <textarea id="multiUnusedInput" style="width:100%; height:180px; background:#000; border:1px solid var(--border); color:#fff; padding:10px; font-size:12px" placeholder="用户名 密码 窗口数 (一行一个，窗口数填 50 或 100，不填默认 100)"></textarea>
     <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:15px">
       <button class="btn btn-ghost" onclick="closeModal('multiUnusedModal')">取消</button>
       <button class="btn btn-secondary" onclick="confirmMultiUnused()" style="background:var(--unused)">确认添加</button>
@@ -2941,7 +2950,7 @@ function toggleStar(id) {
 async function activate(id) {
     const u = db.unused.find(x => x.id === id);
     if(!u) return;
-    if (!(await showActionConfirm(`确定激活“${u.username}”？\n\n默认窗口数${DEFAULT_WINDOWS}\n本次激活无需支付。`, { title:'激活确认', confirmText:'确认激活' }))) return;
+    if (!(await showActionConfirm(`确定激活“${u.username}”？\n\n窗口数${unusedWindows(u)}\n本次激活无需支付。`, { title:'激活确认', confirmText:'确认激活' }))) return;
     const operationClickedAt = new Date().toISOString();
     if (!(await ensureCloudInitializedForAction())) return;
 
@@ -3004,7 +3013,7 @@ async function activate(id) {
     const eday = String(d.getUTCDate()).padStart(2, '0');
 
     newlyActivatedId = id;
-    const activatedUser = { id: id, username: slot.username, password: slot.password, owner: '-', wechat: '-', xianyu: '-', amount: DEFAULT_AMOUNT, windows: DEFAULT_WINDOWS, activeTime, expiry: `${ey}-${em}-${eday}`, isStarred: false };
+    const activatedUser = { id: id, username: slot.username, password: slot.password, owner: '-', wechat: '-', xianyu: '-', amount: DEFAULT_AMOUNT, windows: String(unusedWindows(slot)), activeTime, expiry: `${ey}-${em}-${eday}`, isStarred: false };
     db.users.push(activatedUser);
     db.unused = db.unused.filter(x => x.id !== id);
     recordOperationLog(activatedUser, 'activate', { operatedAt: operationClickedAt, expiryAfter: activatedUser.expiry });
@@ -3073,11 +3082,70 @@ async function quickRenew(id) {
     if (!u) return;
     if (blockForWindowPayment(u, '续费')) return false;
     const renewalPreviewExpiry = getRenewedExpiry(u);
-    if (!(await showRenewalConfirm(u, renewalPreviewExpiry))) return;
+    const renewAmountCents = recordMonthlyAmountCents(u, true);
+    const renewAmountShow = renewAmountCents !== null ? formatMoneyCents(renewAmountCents) : null;
+    if (!(await showRenewalConfirm(u, renewalPreviewExpiry, renewAmountShow))) return;
     const expiryBefore = String(u.expiry || '');
     u.expiry = getRenewedExpiry(u);
     recordOperationLog(u, 'renew', { operatedAt: operationClickedAt, expiryBefore, expiryAfter: u.expiry });
     saveToCloud(); render();
+}
+
+// ── 批量续费（多选，金额叠加合计）──
+let pendingBatchRenew = null;
+
+async function batchRenew() {
+    const ids = Array.from(document.querySelectorAll('.user-cb:checked')).map(cb => cb.dataset.id);
+    if (!ids.length) return;
+    const users = ids.map(id => db.users.find(u => String(u.id) === String(id))).filter(Boolean);
+    if (!users.length) return;
+    if (!(await ensureCloudInitializedForAction())) return;
+    const blocked = users.filter(u => activeWindowPaymentLock(u));
+    if (blocked.length) {
+        alert(`以下 ${blocked.length} 位存在进行中的窗口付款订单，暂不能续费：\n\n${blocked.map(u => u.username + '（' + (u.owner || '无归属') + '）').join('\n')}`);
+        return;
+    }
+    let totalCents = 0;
+    const list = users.map(u => {
+        const amtCents = recordMonthlyAmountCents(u, true) ?? 0;
+        totalCents += amtCents;
+        return { id: u.id, username: u.username, current: u.expiry || '-', next: getRenewedExpiry(u), amountCents: amtCents };
+    });
+    pendingBatchRenew = list;
+    document.getElementById('batchRenewList').innerHTML = list.map(row => {
+        return `<div style="display:flex; gap:8px; align-items:center; border-bottom:1px dashed var(--border); padding:3px 4px;">
+          <span style="color:var(--accent); font-weight:bold;">${escapeHtml(row.username)}</span>
+          <span style="color:var(--text3);">${row.current}</span>
+          <span style="color:#fff;">→</span>
+          <span style="color:#fff;">${row.next}</span>
+          <span style="margin-left:auto; color:var(--warning);">¥${formatMoneyCents(row.amountCents)}</span>
+        </div>`;
+    }).join('');
+    document.getElementById('batchRenewTotal').textContent = `¥${formatMoneyCents(totalCents)}`;
+    document.getElementById('batchRenewModal').classList.add('open');
+}
+
+function cancelBatchRenew() {
+    document.getElementById('batchRenewModal').classList.remove('open');
+    pendingBatchRenew = null;
+}
+
+async function confirmBatchRenew() {
+    const list = pendingBatchRenew;
+    if (!list || !list.length) return;
+    const operationClickedAt = new Date().toISOString();
+    let changed = false;
+    for (const row of list) {
+        const u = db.users.find(x => String(x.id) === String(row.id));
+        if (!u || activeWindowPaymentLock(u)) continue;
+        const expiryBefore = String(u.expiry || '');
+        u.expiry = row.next;
+        recordOperationLog(u, 'renew', { operatedAt: operationClickedAt, expiryBefore, expiryAfter: row.next });
+        changed = true;
+    }
+    cancelBatchRenew();
+    if (changed) { saveToCloud(); render(); }
+    cancelSelect();
 }
 
 async function moveUserToTrash(id, opts = {}) {
@@ -3120,7 +3188,7 @@ async function rollbackUser(id, opts = {}) {
     }
     if(idx > -1 && (needConfirm ? await showActionConfirm("回退到名额列表？", { title:'回退确认', confirmText:'确认回退' }) : true)) {
         const u = db.users.splice(idx, 1)[0];
-        db.unused.push({ id: u.id, username: u.username, password: u.password || DEFAULT_PWD });
+        db.unused.push({ id: u.id, username: u.username, password: u.password || DEFAULT_PWD, windows: String(u.windows || DEFAULT_WINDOWS) });
         if (!opts.noSave) saveToCloud();
         if (!opts.noRender) render();
         return true;
@@ -3132,7 +3200,7 @@ async function rollbackTrashUser(id) {
     const idx = db.trash.findIndex(u => u.id === id);
     if(idx > -1 && await showActionConfirm("确定将此记录回退到待激活名额？", { title:'回退确认', confirmText:'确认回退' })) {
         const u = db.trash.splice(idx, 1)[0];
-        db.unused.push({ id: u.id, username: u.username, password: u.password || DEFAULT_PWD });
+        db.unused.push({ id: u.id, username: u.username, password: u.password || DEFAULT_PWD, windows: String(u.windows || DEFAULT_WINDOWS) });
         saveToCloud(); renderTrash(); render();
     }
 }
@@ -3394,10 +3462,30 @@ function renderStatsBar() {
     document.getElementById('statsBar').innerHTML = Object.keys(labels).map(k => `<div class="stat-card ${currentFilter===k?'active':''}" onclick="currentFilter='${k}';render()"><div class="stat-label">${labels[k]}</div><div class="stat-value" style="color:var(--${k==='all'?'accent':k})">${s[k]}</div></div>`).join('');
 }
 
+function unusedWindows(u) {
+    const w = Number(u && (u.windows ?? 0));
+    return Number.isFinite(w) && w > 0 ? w : Number(DEFAULT_WINDOWS);
+}
+
 function renderUnusedGrid() {
-    document.getElementById('unusedGrid').innerHTML = db.unused.map(u => {
-        const username = escapeHtml(displayVal(u.username));
-        return `<div class="unused-item"><span>${username}</span><button class="btn btn-primary" style="height:18px; font-size:10px" onclick="activate('${u.id}')">激活</button></div>`;
+    const container = document.getElementById('unusedContainer');
+    if (!container) return;
+    const groups = new Map();
+    db.unused.forEach(u => {
+        const w = unusedWindows(u);
+        if (!groups.has(w)) groups.set(w, []);
+        groups.get(w).push(u);
+    });
+    const keys = Array.from(groups.keys()).sort((a, b) => b - a);
+    container.innerHTML = keys.map(w => {
+        const items = groups.get(w).map(u => {
+            const username = escapeHtml(displayVal(u.username));
+            return `<div class="unused-item"><span>${username}</span><button class="btn btn-primary" style="height:18px; font-size:10px" onclick="activate('${u.id}')">激活</button></div>`;
+        }).join('');
+        return `<div class="unused-box">
+      <div style="font-size: 12px; color: var(--unused); font-weight: bold;">🔑 待激活名额（${w}窗口）</div>
+      <div class="unused-list">${items}</div>
+    </div>`;
     }).join('');
 }
 
@@ -3687,7 +3775,7 @@ async function batchRollbackTrash() {
     if (await showActionConfirm(`确定将选中的 ${ids.length} 项回退到待激活名额？`, { title:'批量回退确认', confirmText:'确认回退' })) {
         db.trash = db.trash.filter(u => {
             if(ids.includes(u.id)) {
-                db.unused.push({ id: u.id, username: u.username, password: u.password || DEFAULT_PWD });
+                db.unused.push({ id: u.id, username: u.username, password: u.password || DEFAULT_PWD, windows: String(u.windows || DEFAULT_WINDOWS) });
                 return false;
             }
             return true;
@@ -3861,6 +3949,7 @@ async function confirmMultiUnused() {
     const rawInput = document.getElementById('multiUnusedInput').value;
     const lines = rawInput.split('\n').filter(line => line.trim());
     const duplicates = [];
+    const badWindows = [];
     const toAdd = [];
     const seenInInput = new Set();
     lines.forEach(line => {
@@ -3869,13 +3958,22 @@ async function confirmMultiUnused() {
         if (!uname) return;
         if (!isUsernameUnique(uname) || seenInInput.has(uname.toLowerCase())) {
             duplicates.push(uname);
-        } else {
-            seenInInput.add(uname.toLowerCase());
-            toAdd.push({ id: 'un_'+Date.now()+Math.random(), username: uname, password: p[1]||DEFAULT_PWD });
+            return;
         }
+        const winRaw = (p[2] !== undefined && p[2] !== '') ? String(p[2]).trim() : String(DEFAULT_WINDOWS);
+        if (!/^(50|100)$/.test(winRaw)) {
+            badWindows.push(uname + '：窗口数 ' + winRaw);
+            return;
+        }
+        seenInInput.add(uname.toLowerCase());
+        toAdd.push({ id: 'un_'+Date.now()+Math.random(), username: uname, password: p[1]||DEFAULT_PWD, windows: winRaw });
     });
     if (duplicates.length > 0) {
         alert(`❌ 以下 ${duplicates.length} 个用户名已存在，全部操作已中止，请修正后重新提交：\n\n${duplicates.join('\n')}`);
+        return;
+    }
+    if (badWindows.length > 0) {
+        alert(`❌ 以下 ${badWindows.length} 条窗口数不是 50 或 100，全部操作已中止，请修正后重新提交：\n\n${badWindows.join('\n')}`);
         return;
     }
     try {
@@ -3890,6 +3988,45 @@ async function confirmMultiUnused() {
 }
 function openMultiUnusedModal() { document.getElementById('multiUnusedModal').classList.add('open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+// ── ESC 关闭最顶层二级弹窗 ──
+function getTopmostOverlay() {
+    const openEls = Array.from(document.querySelectorAll('.modal-overlay.open, #trashDrawer.open'));
+    if (!openEls.length) return null;
+    let top = openEls[0];
+    for (let i = 1; i < openEls.length; i++) {
+        const z = Number(getComputedStyle(openEls[i]).zIndex) || 0;
+        const tz = Number(getComputedStyle(top).zIndex) || 0;
+        if (z > tz) { top = openEls[i]; }
+        else if (z === tz) { top = openEls[i]; } // 同层级：按 DOM 顺序后打开者视为最顶
+    }
+    return top;
+}
+
+function closeTopmostOverlay() {
+    const top = getTopmostOverlay();
+    if (!top) return false;
+    switch (top.id) {
+        case 'windowChangeModal': closeWindowChangeModal(); break;
+        case 'renewalConfirmModal': resolveRenewalConfirm(false); break;
+        case 'actionConfirmModal': resolveActionConfirm(false); break;
+        case 'renameUserModal': closeRenameUserModal(); break;
+        case 'multiUnusedModal': closeModal('multiUnusedModal'); break;
+        case 'excelImportPreviewModal': closeExcelImportPreview(); break;
+        case 'bitLinkModal': closeModal('bitLinkModal'); break;
+        case 'operationLogModal': closeModal('operationLogModal'); break;
+        case 'batchRenewModal': cancelBatchRenew(); break;
+        case 'trashDrawer': toggleTrash(false); break;
+        default: top.classList.remove('open');
+    }
+    return true;
+}
+
+window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' || e.key === 'Esc' || e.keyCode === 27) {
+        if (closeTopmostOverlay()) e.preventDefault();
+    }
+});
 function toggleTrash(s) { document.getElementById('trashDrawer').classList.toggle('open',s); document.getElementById('overlay').classList.toggle('open',s); if(s) renderTrash(); }
 function showToast() {
     const toast = document.getElementById('toastMsg');
