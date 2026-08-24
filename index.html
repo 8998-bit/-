@@ -675,17 +675,55 @@ let syncStats = {
     taskWriteKB: 0,
     heartbeatKB: 0
 };
+// ── 流量测量上报（只用一天诊断，用完可删）──
+const TRAFFIC_SOURCE = typeof TARGET_ORG !== 'undefined' && TARGET_ORG ? TARGET_ORG
+    : typeof DEFAULT_OWNER !== 'undefined' && DEFAULT_OWNER ? DEFAULT_OWNER : 'master';
+let _trafficBuf = {};   // { kind: bytes }
+let _trafficTimer = null;
+
+function trafficAccum(kind, bytes) {
+    const b = Math.max(0, Number(bytes) || 0);
+    _trafficBuf[kind] = (_trafficBuf[kind] || 0) + b;
+}
+
+async function trafficFlush() {
+    const buf = _trafficBuf;
+    _trafficBuf = {};
+    if (!Object.keys(buf).length) return;
+    if (typeof supabaseClient === 'undefined' || !supabaseClient) return;
+    const day = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+    try {
+        for (const kind of Object.keys(buf)) {
+            const bytes = buf[kind];
+            if (!bytes) continue;
+            const { error } = await supabaseClient.from('traffic_usage')
+                .upsert(
+                    { source: TRAFFIC_SOURCE, kind, bytes, hits: 1, day },
+                    { onConflict: 'source,kind,day' }
+                );
+            if (error) console.warn('[traffic] 上报失败:', error.message);
+        }
+    } catch (e) { /* 静默 */ }
+}
+
+function trafficStart() {
+    if (_trafficTimer) return;
+    _trafficTimer = setInterval(trafficFlush, 60000);
+    // 页面关闭前刷一次
+    window.addEventListener('pagehide', trafficFlush);
+}
+trafficStart();
 function trackTraffic(type, action, bytes = 0) {
     const kb = Math.max(0, Number(bytes) || 0) / 1024;
     if (type === 'mainData') {
-        if (action === 'version_read') syncStats.mainDataVersionReads += 1;
-        if (action === 'content_read') { syncStats.mainDataContentReads += 1; syncStats.mainDataReadKB += kb; }
-        if (action === 'write') { syncStats.mainDataWrites += 1; syncStats.mainDataWriteKB += kb; }
+        if (action === 'version_read') { syncStats.mainDataVersionReads += 1; trafficAccum('mainData_version_read', bytes || 200); }
+        if (action === 'content_read') { syncStats.mainDataContentReads += 1; syncStats.mainDataReadKB += kb; trafficAccum('mainData_content_read', bytes); }
+        if (action === 'write') { syncStats.mainDataWrites += 1; syncStats.mainDataWriteKB += kb; trafficAccum('mainData_write', bytes); }
     } else if (type === 'task') {
-        if (action === 'read') { syncStats.taskReads += 1; syncStats.taskReadKB += kb; }
-        if (action === 'write') { syncStats.taskWrites += 1; syncStats.taskWriteKB += kb; }
+        if (action === 'read') { syncStats.taskReads += 1; syncStats.taskReadKB += kb; trafficAccum('task_read', bytes); }
+        if (action === 'write') { syncStats.taskWrites += 1; syncStats.taskWriteKB += kb; trafficAccum('task_write', bytes); }
     } else if (type === 'heartbeat') {
-        if (action === 'read') { syncStats.heartbeatReads += 1; syncStats.heartbeatKB += kb; }
+        if (action === 'read') { syncStats.heartbeatReads += 1; syncStats.heartbeatKB += kb; trafficAccum('heartbeat_read', bytes); }
     }
     console.log(`[Supabase Traffic] ${type} ${action} +${kb.toFixed(2)}KB | mainData read ${syncStats.mainDataReadKB.toFixed(1)}KB / write ${syncStats.mainDataWriteKB.toFixed(1)}KB | task ${syncStats.taskReadKB.toFixed(1)}KB / ${syncStats.taskWriteKB.toFixed(1)}KB | heartbeat ${syncStats.heartbeatKB.toFixed(1)}KB`);
 }
