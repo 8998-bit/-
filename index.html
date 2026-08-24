@@ -997,6 +997,13 @@ async function loadOperationLogsFromCloud(force = false) {
             expiryAfter: r.expiry_after || r.expiryAfter || '',
             activeDate: r.active_date || r.activeDate || ''
         }));
+        // 表数据已加载；把本地尚未写入表的新日志合并进来，避免“出现一下就消失”
+        const tableIds = new Set(_opLogCache.map(x => String(x.id || '')));
+        const localPending = (Array.isArray(db.operationLogs) ? db.operationLogs : [])
+            .filter(l => !tableIds.has(String(l.id || '')));
+        if (localPending.length) {
+            _opLogCache = [...localPending, ..._opLogCache];
+        }
         return _opLogCache;
     } catch (e) {
         console.warn('[operation_logs] 读取异常（用本地缓存）:', e.message || e);
@@ -1572,6 +1579,13 @@ async function insertOperationLogToCloud(log) {
         if (error) {
             console.warn('[operation_logs] 写入失败（降级本地）:', error.message, '| id:', log.id);
             return false;
+        }
+        // 表写入成功后回填本地显示缓存，防止同步覆盖导致“日志消失”
+        if (!Array.isArray(_opLogCache)) _opLogCache = [];
+        const dup = _opLogCache.some(x => String(x.id || '') === String(log.id || ''));
+        if (!dup) _opLogCache.unshift(log);
+        if (document.getElementById('operationLogModal') && document.getElementById('operationLogModal').classList.contains('open')) {
+            renderOperationLogs();
         }
         return true;
     } catch (e) {
@@ -2819,7 +2833,11 @@ async function autoResolveConflict(showMask = false) {
         db.bitConnectors = latestData.bitConnectors || [];
         db.bitInventory = latestData.bitInventory || [];
         db.bitUsernameRegistry = latestData.bitUsernameRegistry || [];
-        db.operationLogs = latestData.operationLogs || [];
+        if (Array.isArray(latestData.operationLogs) && latestData.operationLogs.length) {
+            // 第 2 步：日志权威数据在 operation_logs 表，云端 MainData 无此字段；
+            // 仅当云端确实有日志数组时才合并，避免空数组覆盖本地新日志。
+            db.operationLogs = latestData.operationLogs;
+        }
         baseSnapshot = JSON.parse(JSON.stringify(db));
         lastKnownUpdatedAt = latestUpdatedAt;
         render();
@@ -2834,7 +2852,9 @@ async function autoResolveConflict(showMask = false) {
     db.bitConnectors = mergedDb.bitConnectors || [];
     db.bitInventory = mergedDb.bitInventory || [];
     db.bitUsernameRegistry = mergedDb.bitUsernameRegistry || [];
-    db.operationLogs = mergedDb.operationLogs || [];
+    if (Array.isArray(mergedDb.operationLogs) && mergedDb.operationLogs.length) {
+        db.operationLogs = mergedDb.operationLogs;
+    }
     
     // lastKnownUpdatedAt 对应的是 latestData，而不是尚未上传的 mergedDb。
     // 若重试期间再次发生冲突，必须仍能识别 mergedDb 中的全部本地修改。
