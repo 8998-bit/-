@@ -1370,7 +1370,8 @@ function collectRecordBitTasks() {
             ];
             for (const ref of refs) {
                 if (!ref.id) continue;
-                const existing = (db.bitTasks || []).find(item => String(item.id) === String(ref.id));
+                const _taskPool = Array.isArray(_bitTaskCache) ? _bitTaskCache : (db.bitTasks || []);
+                const existing = _taskPool.find(item => String(item.id) === String(ref.id));
                 if (existing) continue;
                 const stableTime = ref.updatedAt || '1970-01-01T00:00:00.000Z';
                 changed = rememberBitTask({
@@ -2145,7 +2146,8 @@ async function refreshBitIntegration(silent = true) {
         if (_changedSuperseded) _changedReasons.push('resolveSupersededBitTasks');
         let _changedRoute = false;
         let changed = _changedCollect || _changedRegistry || _changedSuperseded;
-        for (const task of db.bitTasks || []) {
+        const _taskList = Array.isArray(_bitTaskCache) ? _bitTaskCache : (db.bitTasks || []);
+        for (const task of _taskList) {
             if (task.status === 'routing_required') {
                 const before = `${task.targetConnectorId || ''}|${task.status}`;
                 routeBitTask(task);
@@ -2306,13 +2308,15 @@ function closeBitLinkModal() {
     document.getElementById('bitLinkModal').classList.remove('open');
 }
 
-function openBitLinkModal() {
+async function openBitLinkModal() {
     document.getElementById('bitLinkModal').classList.add('open');
-    loadBitTasksFromCloud(true).then(() => renderBitIntegration());
-    syncConnectors(false);
+    try {
+        await Promise.all([loadBitTasksFromCloud(true), syncConnectors(false)]);
+    } catch (e) { /* 单个失败不阻塞渲染 */ }
+    renderBitIntegration();
     if (_bitTaskPollTimer) clearInterval(_bitTaskPollTimer);
     _bitTaskPollTimer = setInterval(() => {
-        loadBitTasksFromCloud(true).then(() => renderBitIntegration());
+        loadBitTasksFromCloud(false).then(() => renderBitIntegration());
     }, 10000);
 }
 
