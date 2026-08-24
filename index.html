@@ -470,7 +470,7 @@
   </div>
 </div>
 
-<div class="modal-overlay" id="bitLinkModal" onclick="if(event.target===this)this.classList.remove('open')">
+<div class="modal-overlay" id="bitLinkModal" onclick="if(event.target===this)closeBitLinkModal()">
   <div class="modal bit-modal">
     <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
       <div>
@@ -903,9 +903,21 @@ function recordOperationLog(record, action, details = {}) {
         expiryBefore: String(details.expiryBefore || ''),
         expiryAfter: String(details.expiryAfter || record.expiry || ''),
         windows: String(details.windows ?? record.windows ?? ''),
-        amount: String(details.paymentAmount ?? details.amount ?? record.amount ?? '')
+        amount: String(details.paymentAmount ?? details.amount ?? record.amount ?? ''),
+        paymentOrderNo: String(details.paymentOrderNo || ''),
+        paymentIntentId: String(details.paymentIntentId || ''),
+        paymentAmount: String(details.paymentAmount || ''),
+        alipayTradeNo: String(details.alipayTradeNo || ''),
+        paymentTenant: String(details.paymentTenant || ''),
+        windowsBefore: String(details.windowsBefore || ''),
+        amountBefore: String(details.amountBefore || ''),
+        paidTargetWindows: String(details.paidTargetWindows || ''),
+        actualWindows: String(details.actualWindows || ''),
+        manualExtraWindows: String(details.manualExtraWindows || ''),
+        syncSource: String(details.syncSource || '')
     };
     db.operationLogs.unshift(log);
+    insertOperationLogToCloud(log); // 第 2 步：独立表（失败降级，不阻塞）
     return log;
 }
 
@@ -942,6 +954,67 @@ function formatOperationTime(value) {
     if (!value) return '-';
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false });
+}
+
+// 第 2 步：操作日志从 operation_logs 独立表读取（缓存到内存供窗口渲染）
+let _opLogCache = null;          // 最近一次从表查到的日志（null=未加载）
+let _opLogOwnerFilter = '';      // 老板页按 owner 过滤；主 index 为空=全部
+const OPERATION_LOG_PAGE_SIZE = 500;
+
+async function loadOperationLogsFromCloud(force = false) {
+    if (_opLogCache && !force) return _opLogCache;
+    if (typeof supabaseClient === 'undefined' || !supabaseClient) return _opLogCache || [];
+    try {
+        let query = supabaseClient.from('operation_logs').select('*');
+        if (typeof TARGET_ORG !== 'undefined' && TARGET_ORG) {
+            _opLogOwnerFilter = String(TARGET_ORG);
+            query = query.eq('owner', _opLogOwnerFilter);
+        } else if (typeof DEFAULT_OWNER !== 'undefined' && DEFAULT_OWNER) {
+            _opLogOwnerFilter = String(DEFAULT_OWNER);
+            query = query.eq('owner', _opLogOwnerFilter);
+        } else {
+            _opLogOwnerFilter = '';
+        }
+        const { data, error } = await query
+            .order('operated_at', { ascending: false })
+            .limit(OPERATION_LOG_PAGE_SIZE);
+        if (error) {
+            console.warn('[operation_logs] 读取失败（用本地缓存）:', error.message);
+            return _opLogCache || [];
+        }
+        // 表字段 snake_case → 渲染逻辑用的 camelCase
+        _opLogCache = (data || []).map(r => ({
+            id: r.id,
+            username: r.username,
+            wechat: r.wechat,
+            owner: r.owner,
+            action: r.action,
+            windows: r.windows,
+            amount: r.amount,
+            paymentAmount: r.payment_amount || r.paymentAmount || '',
+            operatedAt: r.operated_at || r.operatedAt || '',
+            expiryBefore: r.expiry_before || r.expiryBefore || '',
+            expiryAfter: r.expiry_after || r.expiryAfter || '',
+            activeDate: r.active_date || r.activeDate || ''
+        }));
+        return _opLogCache;
+    } catch (e) {
+        console.warn('[operation_logs] 读取异常（用本地缓存）:', e.message || e);
+        return _opLogCache || [];
+    }
+}
+
+function operationLogsInScope() {
+    // 第 2 步：优先用独立表缓存；表未加载时回退本地 db.operationLogs
+    if (Array.isArray(_opLogCache)) return _opLogCache;
+    const logs = Array.isArray(db.operationLogs) ? db.operationLogs : [];
+    if (typeof TARGET_ORG !== 'undefined' && TARGET_ORG) {
+        return logs.filter(l => String(l.owner || '') === String(TARGET_ORG));
+    }
+    if (typeof DEFAULT_OWNER !== 'undefined' && DEFAULT_OWNER) {
+        return logs.filter(l => String(l.owner || '') === String(DEFAULT_OWNER));
+    }
+    return logs;
 }
 
 function renderOperationLogs() {
@@ -993,24 +1066,36 @@ async function deleteOperationLog(logId) {
     const action = OPERATION_ACTION_LABELS[log.action] || log.action || '操作';
     if (!(await showActionConfirm(`确定删除「${log.username || '-'}」的“${action}”日志？\n\n只会删除这条日志，不会影响员工号或联动任务。`, { title:'删除日志', confirmText:'确认删除', danger:true }))) return;
     logs.splice(index, 1);
+    try {
+        if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+            await supabaseClient.from('operation_logs').delete().eq('id', String(logId));
+        }
+    } catch (e) {
+        console.warn('[operation_logs] 删除失败:', e.message || e);
+    }
     renderOperationLogs();
-    saveToCloud();
 }
 
 async function clearOperationLogs() {
-    const logs = Array.isArray(db.operationLogs) ? db.operationLogs : [];
-    const logCount = logs.length;
-    if (!logCount) return alert('当前没有可清空的操作日志。');
-    if (!(await showActionConfirm(`确定清空全部 ${logCount} 条操作日志？\n\n不受当前搜索条件影响；只会删除操作日志，不会影响员工号、金额或联动任务。`, { title:'清空操作日志', confirmText:'确认清空', danger:true }))) return;
+    if (!(await showActionConfirm('确定清空全部操作日志？\n\n只会删除操作日志，不会影响员工号、金额或联动任务。', { title:'清空操作日志', confirmText:'确认清空', danger:true }))) return;
     db.operationLogs = [];
+    try {
+        if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+            await supabaseClient.from('operation_logs').delete().neq('id', '').maybeSingle();
+        }
+    } catch (e) {
+        console.warn('[operation_logs] 清空失败:', e.message || e);
+    }
     const searchInput = document.getElementById('operationLogSearchInput');
     if (searchInput) searchInput.value = '';
     renderOperationLogs();
-    saveToCloud();
 }
 
-function openOperationLogModal() {
+async function openOperationLogModal() {
     document.getElementById('operationLogModal').classList.add('open');
+    try {
+        await loadOperationLogsFromCloud(true);
+    } catch (e) { /* 降级本地 */ }
     renderOperationLogs();
 }
 
@@ -1475,6 +1560,26 @@ function bitTaskToRow(job) {
     };
 }
 
+// 第 2 步：操作日志写入 operation_logs 独立表（失败静默降级——不阻塞页面主流程）
+async function insertOperationLogToCloud(log) {
+    if (!log || !log.id) return false;
+    if (typeof supabaseClient === 'undefined' || !supabaseClient) return false;
+    const row = { ...log };
+    try {
+        const { error } = await supabaseClient
+            .from('operation_logs')
+            .insert(row);
+        if (error) {
+            console.warn('[operation_logs] 写入失败（降级本地）:', error.message, '| id:', log.id);
+            return false;
+        }
+        return true;
+    } catch (e) {
+        console.warn('[operation_logs] 写入异常（降级本地）:', e.message || e);
+        return false;
+    }
+}
+
 // 第 1 步：任务写入 bit_tasks 独立表（幂等，失败静默降级——不阻塞页面主流程）
 async function insertBitTaskToCloud(job) {
     if (!job || !job.id) return false;
@@ -1866,7 +1971,7 @@ function renderBitIntegration() {
     const clearLogsButton = document.getElementById('clearBitTaskLogsButton');
     if (!button || !summary || !routeList || !jobList) return;
 
-    const tasks = [...(db.bitTasks || [])].sort((a, b) =>
+    const tasks = [...(Array.isArray(_bitTaskCache) ? _bitTaskCache : (db.bitTasks || []))].sort((a, b) =>
         String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))
     );
     const jobSearchValue = String(jobSearchInput?.value || '').trim().toLowerCase();
@@ -2096,10 +2201,74 @@ async function processExpiredUsers() {
     return moved;
 }
 
+// 第 2 步：任务窗口改查 bit_tasks 独立表
+let _bitTaskCache = null;         // 最近一次从 bit_tasks 查到的任务（null=未加载）
+let _bitTaskPollTimer = null;     // 任务窗口 10 秒轮询定时器
+let _bitHistoryLoaded = false;    // 最近成功历史是否已加载（打开窗口一次，避免轮询重复拉）
+const BIT_TASK_ACTIVE_STATUSES = ['pending', 'processing', 'retry_wait', 'routing_required', 'needs_attention'];
+const BIT_TASK_PAGE_SIZE = 100;
+
+async function loadBitTasksFromCloud(force = false) {
+    if (typeof supabaseClient === 'undefined' || !supabaseClient) return _bitTaskCache || [];
+    try {
+        const scopeFilter = (q) => {
+            if (typeof TARGET_ORG !== 'undefined' && TARGET_ORG) return q.eq('source_owner', String(TARGET_ORG));
+            if (typeof DEFAULT_OWNER !== 'undefined' && DEFAULT_OWNER) return q.eq('source_owner', String(DEFAULT_OWNER));
+            return q;
+        };
+        // 只取需要的列，避免 record_snapshot 等大字段拖累流量
+        const cols = 'id,status,action,username,new_username,source_record_id,source_owner,target_connector_id,target_prefix,bit_user_id,target_window_count,attempts,claimed_by,result_code,last_error,created_at,updated_at,completed_at';
+        // ① active 任务：每轮轮询都查（通常 0-5 条，很小）
+        let activeQuery = scopeFilter(supabaseClient.from('bit_tasks').select(cols));
+        const { data: activeData, error: activeErr } = await activeQuery
+            .in('status', ['pending', 'processing', 'retry_wait', 'routing_required', 'needs_attention'])
+            .order('created_at', { ascending: false })
+            .limit(50);
+        if (activeErr) { console.warn('[bit_tasks] active 读取失败:', activeErr.message); return _bitTaskCache || []; }
+        // ② 最近成功历史：仅打开窗口/force 时加载一次，轮询阶段不重复拉
+        let historyData = [];
+        if (force || !_bitHistoryLoaded) {
+            const { data, error } = await scopeFilter(supabaseClient.from('bit_tasks').select(cols))
+                .in('status', ['success', 'resolved', 'cancelled'])
+                .order('created_at', { ascending: false })
+                .limit(BIT_TASK_PAGE_SIZE || 100);
+            if (!error) { historyData = data || []; _bitHistoryLoaded = true; }
+            else console.warn('[bit_tasks] 历史读取失败:', error.message);
+        }
+        const mapRow = r => ({
+            id: r.id, status: r.status, action: r.action, username: r.username,
+            newUsername: r.new_username || r.newUsername || '',
+            sourceRecordId: r.source_record_id || r.sourceRecordId || '',
+            sourceOwner: r.source_owner || r.sourceOwner || '',
+            targetConnectorId: r.target_connector_id || r.targetConnectorId || '',
+            targetPrefix: r.target_prefix || r.targetPrefix || '',
+            bitUserId: r.bit_user_id || r.bitUserId || '',
+            targetWindowCount: r.target_window_count ?? r.targetWindowCount ?? null,
+            attempts: r.attempts ?? 0, claimedBy: r.claimed_by || r.claimedBy || '',
+            resultCode: r.result_code || r.resultCode || '', lastError: r.last_error || r.lastError || '',
+            createdAt: r.created_at || r.createdAt || '', updatedAt: r.updated_at || r.updatedAt || '',
+            completedAt: r.completed_at || r.completedAt || null
+        });
+        const merged = [...(historyData || []).map(mapRow), ...(activeData || []).map(mapRow)];
+        _bitTaskCache = merged.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+        return _bitTaskCache;
+    } catch (e) { console.warn('[bit_tasks] 读取异常:', e.message || e); return _bitTaskCache || []; }
+}
+
+function closeBitLinkModal() {
+    if (_bitTaskPollTimer) { clearInterval(_bitTaskPollTimer); _bitTaskPollTimer = null; }
+    _bitHistoryLoaded = false;
+    document.getElementById('bitLinkModal').classList.remove('open');
+}
+
 function openBitLinkModal() {
     document.getElementById('bitLinkModal').classList.add('open');
-    renderBitIntegration();
+    loadBitTasksFromCloud(true).then(() => renderBitIntegration());
     syncConnectors(false);
+    if (_bitTaskPollTimer) clearInterval(_bitTaskPollTimer);
+    _bitTaskPollTimer = setInterval(() => {
+        loadBitTasksFromCloud(true).then(() => renderBitIntegration());
+    }, 10000);
 }
 
 async function refreshBitLinkData() {
@@ -2250,11 +2419,9 @@ function buildMainDataPayload() {
         users: db.users,
         unused: db.unused,
         trash: db.trash,
-        bitTasks: db.bitTasks || [],
         bitConnectors: db.bitConnectors || [],
         bitInventory: db.bitInventory || [],
-        bitUsernameRegistry: db.bitUsernameRegistry || [],
-        operationLogs: db.operationLogs || []
+        bitUsernameRegistry: db.bitUsernameRegistry || []
     };
 }
 
