@@ -2363,6 +2363,10 @@ async function openBitLinkModal() {
     renderBitIntegration();
     if (_bitTaskPollTimer) clearInterval(_bitTaskPollTimer);
     _bitTaskPollTimer = setInterval(() => {
+        _bitPollCount = (_bitPollCount || 0) + 1;
+        if (_bitPollCount % 6 === 0) {
+            _bitHistoryLoaded = false; // 每60秒重拉一次历史，避免任务完成后从列表消失
+        }
         loadBitTasksFromCloud(false).then(() => renderBitIntegration());
     }, 10000);
 }
@@ -2371,6 +2375,9 @@ async function refreshBitLinkData() {
     await syncFromCloud(false);
     await syncConnectors(false);
     rebuildActiveConnectors();
+    if (typeof loadBitTasksFromCloud === 'function') {
+        await loadBitTasksFromCloud(true);
+    }
     renderBitIntegration();
 }
 
