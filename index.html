@@ -20,6 +20,10 @@
   .header { position:sticky; top:0; z-index:100; width:min(calc(100% - 48px), var(--adaptive-shell-width)); max-width:none; margin:0 auto; background: rgba(10,11,13,0.9); backdrop-filter: blur(10px); border-bottom: 1px solid var(--border); padding: 10px 20px; display:flex; align-items:center; justify-content:space-between; }
   .logo { font-family:'Syne',sans-serif; font-weight:800; color: var(--accent); font-size: 1.3rem; }
   .sync-info { font-size: 11px; color: var(--text3); margin-left: 10px; }
+  .usage-stats { display:flex; flex-direction:column; gap:2px; font-size:11px; line-height:1.35; background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:3px 8px; white-space:nowrap; }
+  .usage-stats .usage-row { color:var(--text); }
+  .usage-stats .usage-row b { color:var(--accent); font-weight:700; }
+  .usage-stats .usage-row .u-num { color:var(--success); font-weight:700; }
 
   .toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: var(--success); color: #000; padding: 8px 20px; border-radius: 4px; font-weight: bold; font-size: 12px; z-index: 9999; opacity: 0; transition: opacity 0.3s, transform 0.3s; pointer-events: none; box-shadow: 0 4px 15px rgba(46, 213, 115, 0.4); }
   .toast.show { opacity: 1; transform: translate(-50%, 10px); }
@@ -281,6 +285,7 @@
     <span class="sync-info" id="syncStatus">连接中...</span>
   </div>
   <div style="display:flex; gap:8px;">
+    <span id="usageStats" class="usage-stats" style="display:none"></span>
     <button class="btn btn-ghost" onclick="toggleTrash(true)">🗑️ 回收站 (<span id="trashCount">0</span>)</button>
     <button class="btn btn-ghost operation-log-btn" id="operationLogButton" onclick="openOperationLogModal()">📝 操作日志</button>
     <button class="btn btn-ghost bit-link-btn" id="bitLinkButton" onclick="openBitLinkModal()">🔗 联动检测中</button>
@@ -2179,6 +2184,35 @@ async function refreshBitIntegrationLight() {
     bitIntegrationAvailable = true;
     bitIntegrationMessage = '任务保存在MainData；连接器心跳已使用独立轻量通道';
     renderBitIntegration();
+    renderUsageStats();
+}
+
+// 按连接器名称显示 窗口/员工 用量（数据来自联动工具心跳 payload.usage）
+function renderUsageStats() {
+    const el = document.getElementById('usageStats');
+    if (!el) return;
+    const connectorById = new Map((db.bitConnectors || []).map(connector => [String(connector?.id || ''), connector]));
+    const rows = [];
+    for (const [connectorId, heartbeat] of connectorHeartbeatById) {
+        const usage = heartbeat && heartbeat.payload && heartbeat.payload.usage;
+        if (!usage || typeof usage !== 'object') continue;
+        const connector = connectorById.get(String(connectorId || '')) || {};
+        const name = String(connector.displayName || connector.display_name || connectorId || '连接器');
+        const usedWindows = Number.isFinite(Number(usage.used_windows)) ? Number(usage.used_windows) : null;
+        const totalWindows = Number.isFinite(Number(usage.total_windows)) ? Number(usage.total_windows) : null;
+        const usedEmployees = Number.isFinite(Number(usage.used_employees)) ? Number(usage.used_employees) : null;
+        const totalEmployees = Number.isFinite(Number(usage.total_employees)) ? Number(usage.total_employees) : null;
+        const fmtUsed = (v) => v === null ? '--' : v;
+        const fmtTotal = (v) => v === null || v === 0 ? '--' : v;
+        rows.push(`<div class="usage-row"><b>${escapeHtml(name)}</b> 窗口 <span class="u-num">${fmtUsed(usedWindows)}</span>/${fmtTotal(totalWindows)} 员工 <span class="u-num">${fmtUsed(usedEmployees)}</span>/${fmtTotal(totalEmployees)}</div>`);
+    }
+    if (rows.length) {
+        el.style.display = 'flex';
+        el.innerHTML = rows.join('');
+    } else {
+        el.style.display = 'none';
+        el.innerHTML = '';
+    }
 }
 
 async function refreshBitIntegration(silent = true) {
@@ -2264,8 +2298,22 @@ async function syncConnectors(silent = true) {
         if (error) throw error;
         trackTraffic('heartbeat', 'read', JSON.stringify(data || []).length || 0);
         const knownConnectorIds = new Set((db.bitConnectors || []).map(connector => String(connector?.id || '')).filter(Boolean));
-        connectorHeartbeatById = new Map((data || []).filter(row => knownConnectorIds.has(String(row.connector_id || ''))).map(row => [String(row.connector_id || ''), row]));
+        let heartbeatRows = (data || []).filter(row => knownConnectorIds.has(String(row.connector_id || '')));
+        // 心跳 RPC 若未返回 payload（用量数据），补查一次表拿到 payload
+        if (!heartbeatRows.some(row => row && row.payload)) {
+            try {
+                const { data: rawRows, error: rawErr } = await supabaseClient.from('bit_connector_heartbeats')
+                    .select('connector_id,last_seen,payload')
+                    .in('connector_id', Array.from(knownConnectorIds));
+                if (!rawErr && Array.isArray(rawRows) && rawRows.length) {
+                    const byId = new Map(rawRows.map(row => [String(row.connector_id || ''), row]));
+                    heartbeatRows = heartbeatRows.map(row => byId.get(String(row.connector_id || '')) || row);
+                }
+            } catch (e) { /* 补查失败不影响在线状态 */ }
+        }
+        connectorHeartbeatById = new Map(heartbeatRows.map(row => [String(row.connector_id || ''), row]));
         rebuildActiveConnectors();
+        renderUsageStats();
         await refreshBitIntegrationLight();
     } catch (err) {
         console.error('[sync] 拉取连接器心跳失败:', err);
