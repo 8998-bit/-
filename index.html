@@ -732,6 +732,7 @@ function trackTraffic(type, action, bytes = 0) {
     console.log(`[Supabase Traffic] ${type} ${action} +${kb.toFixed(2)}KB | mainData read ${syncStats.mainDataReadKB.toFixed(1)}KB / write ${syncStats.mainDataWriteKB.toFixed(1)}KB | task ${syncStats.taskReadKB.toFixed(1)}KB / ${syncStats.taskWriteKB.toFixed(1)}KB | heartbeat ${syncStats.heartbeatKB.toFixed(1)}KB`);
 }
 let connectorHeartbeatById = new Map();
+let connectorUsageById = new Map();
 let activeConnectors = [];
 let bitConnectorRoutes = [];
 let bitIntegrationAvailable = null;
@@ -2193,8 +2194,7 @@ function renderUsageStats() {
     if (!el) return;
     const connectorById = new Map((db.bitConnectors || []).map(connector => [String(connector?.id || ''), connector]));
     const rows = [];
-    for (const [connectorId, heartbeat] of connectorHeartbeatById) {
-        const usage = heartbeat && heartbeat.payload && heartbeat.payload.usage;
+    for (const [connectorId, usage] of connectorUsageById) {
         if (!usage || typeof usage !== 'object') continue;
         const connector = connectorById.get(String(connectorId || '')) || {};
         const name = String(connector.displayName || connector.display_name || connectorId || '连接器');
@@ -2298,20 +2298,17 @@ async function syncConnectors(silent = true) {
         if (error) throw error;
         trackTraffic('heartbeat', 'read', JSON.stringify(data || []).length || 0);
         const knownConnectorIds = new Set((db.bitConnectors || []).map(connector => String(connector?.id || '')).filter(Boolean));
-        let heartbeatRows = (data || []).filter(row => knownConnectorIds.has(String(row.connector_id || '')));
-        // 心跳 RPC 若未返回 payload（用量数据），补查一次表拿到 payload
-        if (!heartbeatRows.some(row => row && row.payload)) {
-            try {
-                const { data: rawRows, error: rawErr } = await supabaseClient.from('bit_connector_heartbeats')
-                    .select('connector_id,last_seen,payload')
-                    .in('connector_id', Array.from(knownConnectorIds));
-                if (!rawErr && Array.isArray(rawRows) && rawRows.length) {
-                    const byId = new Map(rawRows.map(row => [String(row.connector_id || ''), row]));
-                    heartbeatRows = heartbeatRows.map(row => byId.get(String(row.connector_id || '')) || row);
-                }
-            } catch (e) { /* 补查失败不影响在线状态 */ }
-        }
+        const heartbeatRows = (data || []).filter(row => knownConnectorIds.has(String(row.connector_id || '')));
         connectorHeartbeatById = new Map(heartbeatRows.map(row => [String(row.connector_id || ''), row]));
+        // 用量数据从独立表 connector_usage 读取（联动工具心跳时 upsert）
+        try {
+            const { data: usageRows, error: usageErr } = await supabaseClient.from('connector_usage')
+                .select('*')
+                .in('connector_id', Array.from(knownConnectorIds));
+            if (!usageErr && Array.isArray(usageRows)) {
+                connectorUsageById = new Map(usageRows.filter(row => row && row.connector_id).map(row => [String(row.connector_id), row]));
+            }
+        } catch (e) { /* 用量查询失败不影响在线状态 */ }
         rebuildActiveConnectors();
         renderUsageStats();
         await refreshBitIntegrationLight();
