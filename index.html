@@ -1541,6 +1541,7 @@ async function enqueueBitJob(record, action, dedupeKey, options = {}) {
         id: newBitId(),
         dedupeKey,
         sourceRecordId: String(record.id),
+        sourceOwner: String(record.owner || ''),
         username: String(record.username).trim(),
         newUsername,
         action,
