@@ -3695,7 +3695,31 @@ async function confirmWindowChange() {
     if (delta > 0 && remainingDays === null) return alert('当前到期日期无效，无法计算还需支付金额，请先修正到期日期。');
     const amountDueCents = delta > 0 ? proratedWindowIncreaseCents(currentAmountCents, newAmountCents, remainingDays) : 0;
     if (delta > 0 && amountDueCents === null) return alert('无法根据月费差额和剩余天数计算还需支付金额。');
-    if (activeWindowChangeTask(record)) return alert('该员工号已有修改窗口任务未完成，请等待完成或先在联动状态中取消。');
+    {
+        const _activeTask = activeWindowChangeTask(record);
+        if (_activeTask) {
+            let _taskDone = false;
+            try {
+                const { data: _liveTask } = await supabaseClient
+                    .from('bit_tasks')
+                    .select('id,status')
+                    .eq('id', _activeTask.id)
+                    .maybeSingle();
+                if (_liveTask && _liveTask.id) {
+                    const _st = String(_liveTask.status || '');
+                    _taskDone = ['success', 'resolved', 'cancelled'].includes(_st);
+                } else {
+                    // bit_tasks 里查不到 = 旧任务，按本地状态判断
+                    _taskDone = false;
+                }
+            } catch (e) {
+                _taskDone = false;
+            }
+            if (!_taskDone) {
+                return alert('该员工号已有修改窗口任务未完成，请等待完成或先在联动状态中取消。');
+            }
+        }
+    }
     try {
         await enqueueBitJob(
             record,
