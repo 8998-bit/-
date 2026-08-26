@@ -2192,7 +2192,7 @@ function renderUsageStats() {
     const el = document.getElementById('usageStats');
     if (!el) return;
     const connectorById = new Map((db.bitConnectors || []).map(connector => [String(connector?.id || ''), connector]));
-    const rows = [];
+    const items = [];
     for (const [connectorId, usage] of connectorUsageById) {
         if (!usage || typeof usage !== 'object') continue;
         const connector = connectorById.get(String(connectorId || '')) || {};
@@ -2201,10 +2201,17 @@ function renderUsageStats() {
         const totalWindows = Number.isFinite(Number(usage.total_windows)) ? Number(usage.total_windows) : null;
         const usedEmployees = Number.isFinite(Number(usage.used_employees)) ? Number(usage.used_employees) : null;
         const totalEmployees = Number.isFinite(Number(usage.total_employees)) ? Number(usage.total_employees) : null;
-        const fmtUsed = (v) => v === null ? '--' : v;
-        const fmtTotal = (v) => v === null || v === 0 ? '--' : v;
-        rows.push(`<div class="usage-row"><b>${escapeHtml(name)}</b> <span class="u-num">${fmtUsed(usedWindows)}</span>/${fmtTotal(totalWindows)} · 员工 <span class="u-num">${fmtUsed(usedEmployees)}</span>/${fmtTotal(totalEmployees)}</div>`);
+        items.push({ name, usedWindows, totalWindows, usedEmployees, totalEmployees });
     }
+    // 窗口数少的排上面（升序）；无数据的排最后
+    items.sort((x, y) => {
+        const a = x.usedWindows === null ? Infinity : x.usedWindows;
+        const b = y.usedWindows === null ? Infinity : y.usedWindows;
+        return a - b;
+    });
+    const fmtUsed = (v) => v === null ? '--' : v;
+    const fmtTotal = (v) => v === null || v === 0 ? '--' : v;
+    const rows = items.map(item => `<div class="usage-row"><b>${escapeHtml(item.name)}</b> <span class="u-num">${fmtUsed(item.usedWindows)}</span>/${fmtTotal(item.totalWindows)} · 员工 <span class="u-num">${fmtUsed(item.usedEmployees)}</span>/${fmtTotal(item.totalEmployees)}</div>`);
     if (rows.length) {
         el.style.display = 'flex';
         el.innerHTML = `<div class="stat-label">窗口 / 员工用量</div>` + rows.join('');
@@ -3866,6 +3873,7 @@ function renderStatsBar() {
     // 用量卡片（联动工具窗口/员工用量），占原“待激活”右侧位置，不可点击筛选
     const usageCard = `<div class="stat-card" id="usageStats" style="display:none; cursor:default; text-align:center; justify-content:center;"></div>`;
     document.getElementById('statsBar').innerHTML = cards + usageCard;
+    renderUsageStats(); // 重建用量卡后立即回填，避免切换筛选时消失
 }
 
 function unusedWindows(u) {
