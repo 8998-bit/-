@@ -306,7 +306,7 @@
           <th width="48"><input type="checkbox" id="selectAll" onclick="toggleSelectAll('userTableBody', 'selectAll')"></th>
           <th width="48">复制</th>
           <th width="78">归属<input type="text" class="col-filter" data-col="owner" oninput="onFilterInput()"></th>
-          <th width="80">窗口<span class="header-stat" id="statWindows">/0</span><input type="text" class="col-filter" data-col="windows" oninput="onFilterInput()"></th>
+          <th width="95">窗口<span class="header-stat" id="statWindows">/0</span><input type="text" class="col-filter" data-col="windows" oninput="onFilterInput()"></th>
           <th width="96">用户<span class="header-stat" id="statUsers">/0</span><input type="text" class="col-filter" data-col="username" oninput="onFilterInput()"></th>
           <th width="86">密码<input type="text" class="col-filter" data-col="password" oninput="onFilterInput()"></th>
           <th width="90">微信<input type="text" class="col-filter" data-col="wechat" oninput="onFilterInput()"></th>
@@ -662,6 +662,8 @@ let _idleRenderTimer = null; // 编辑空闲后再刷新整表，避免连续编
 let _isSyncing = false;      // 拉取锁，防止定时器重叠请求
 let _isClearingBitLogs = false;
 let _bitRefreshPromise = null;
+let _bitPollCount = 0;
+
 let _isSyncingConnectors = false;
 let _lastConnectorsSyncAt = 0;
 let _lastVisibilitySyncAt = 0;
@@ -880,6 +882,129 @@ function normAmount(v) {
 function cleanAmountList(arr) {
     return Array.isArray(arr) ? arr.map(u => (u && typeof u === 'object') ? { ...u, amount: normAmount(u.amount) } : u) : [];
 }
+// P3-C: app_users 行（snake_case）→ 前端记录（camelCase + 分桶）
+function mapAppUserRow(row) {
+    const active = String(row?.active_time || row?.activeTime || '');
+    return {
+        id: String(row?.id || ''),
+        status: String(row?.status || 'active'),
+        owner: String(row?.owner ?? ''),
+        username: String(row?.username || ''),
+        password: String(row?.password ?? ''),
+        wechat: String(row?.wechat ?? ''),
+        xianyu: String(row?.xianyu ?? ''),
+        expiry: String(row?.expiry ?? ''),
+        windows: row?.windows ?? 100,
+        amount: row?.amount ?? '',
+        activeTime: active,
+        isStarred: Boolean(row?.is_starred ?? false),
+        bitWindowQuota: row?.bit_window_quota ?? null,
+        bitExistingWindows: row?.bit_existing_windows ?? null,
+        bitWindowQuotaUpdatedAt: row?.bit_window_quota_updated_at ?? null,
+        windowJobId: row?.window_job_id ?? null,
+        windowTarget: row?.window_target ?? null,
+        windowSyncStatus: row?.window_sync_status ?? null,
+        bitJobId: row?.bit_job_id ?? null,
+        bitSyncStatus: row?.bit_sync_status ?? null,
+        bitSyncMessage: row?.bit_sync_message ?? null,
+        bitSyncAction: row?.bit_sync_action ?? null,
+        bitSyncUpdatedAt: row?.bit_sync_updated_at ?? null,
+        remark: row?.remark ?? '',
+        billingRevision: row?.billing_revision ?? 0,
+        billingUpdatedAt: row?.billing_updated_at ?? null,
+        billingUpdateSource: row?.billing_update_source ?? null,
+        billingSyncError: row?.billing_sync_error ?? null,
+        billingSyncErrorAt: row?.billing_sync_error_at ?? null,
+        updatedAt: row?.updated_at ?? null,
+    };
+}
+// P3-C: bit_connectors 行（snake_case）→ 前端 camelCase
+function mapConnectorRow(row) {
+    return {
+        id: String(row?.id || ''),
+        displayName: String(row?.displayName ?? row?.display_name ?? ''),
+        accountPrefix: String(row?.accountPrefix ?? row?.account_prefix ?? ''),
+        prefixes: Array.isArray(row?.prefixes) ? row.prefixes.map(String) : [],
+        manualAccounts: Array.isArray(row?.manualAccounts) ? row.manualAccounts.map(String) : [],
+        manualAccountText: String(row?.manualAccountText ?? row?.manual_account_text ?? ''),
+        enabled: row?.enabled !== false,
+        updatedAt: row?.updatedAt ?? row?.updated_at ?? null,
+    };
+}
+// P3-C: saveToCloud 单行写辅助
+const _FIELD_MAP = [
+    ['status', 'status'], ['owner', 'owner'], ['wechat', 'wechat'], ['xianyu', 'xianyu'],
+    ['expiry', 'expiry'], ['windows', 'windows'], ['amount', 'amount'],
+    ['isStarred', 'is_starred'], ['activeTime', 'active_time'], ['remark', 'remark'],
+    ['bitWindowQuota', 'bit_window_quota'], ['bitExistingWindows', 'bit_existing_windows'],
+    ['bitWindowQuotaUpdatedAt', 'bit_window_quota_updated_at'], ['windowJobId', 'window_job_id'],
+    ['windowTarget', 'window_target'], ['windowSyncStatus', 'window_sync_status'],
+    ['bitJobId', 'bit_job_id'], ['bitSyncAction', 'bit_sync_action'],
+    ['bitSyncStatus', 'bit_sync_status'], ['bitSyncMessage', 'bit_sync_message'],
+    ['bitSyncUpdatedAt', 'bit_sync_updated_at'],
+    ['billingRevision', 'billing_revision'], ['billingUpdatedAt', 'billing_updated_at'],
+    ['billingUpdateSource', 'billing_update_source'], ['billingSyncError', 'billing_sync_error'],
+    ['billingSyncErrorAt', 'billing_sync_error_at'],
+];
+// 对比 base/cur 前端记录，返回变化 dict（snake_case 键，值已归一化）
+function diffUserFields(baseRec, curRec) {
+    const changes = {};
+    for (const [cam, snake] of _FIELD_MAP) {
+        if (['status', 'isStarred', 'windows', 'billingRevision', 'bitWindowQuota', 'bitExistingWindows', 'windowTarget'].includes(cam)) {
+            // 数值/布尔：规整比较
+            const b = cam === 'isStarred' ? !!baseRec[cam] : (baseRec[cam] === null || baseRec[cam] === undefined ? null : Number(baseRec[cam]));
+            const c = cam === 'isStarred' ? !!curRec[cam] : (curRec[cam] === null || curRec[cam] === undefined ? null : Number(curRec[cam]));
+            if (b !== c) changes[snake] = cam === 'isStarred' ? c : c;
+        } else {
+            const b = baseRec[cam] === null || baseRec[cam] === undefined ? '' : String(baseRec[cam]);
+            const c = curRec[cam] === null || curRec[cam] === undefined ? '' : String(curRec[cam]);
+            if (b !== c) changes[snake] = c;
+        }
+    }
+    return changes;
+}
+// 前端记录 → app_users insert 列（snake_case）
+function userToInsertPayload(rec, status) {
+    const out = {
+        id: String(rec.id || ''), status: String(status || 'active'),
+        username: String(rec.username || ''), password: String(rec.password || ''),
+        owner: String(rec.owner ?? '-'), wechat: String(rec.wechat ?? '-'),
+        xianyu: String(rec.xianyu ?? '-'), expiry: String(rec.expiry ?? ''),
+        windows: rec.windows ?? 100, amount: rec.amount ?? '',
+        active_time: rec.activeTime || '', is_starred: !!rec.isStarred,
+        remark: rec.remark || '',
+    };
+    return out;
+}
+// 判断 id 所在桶
+function bucketNameOf(state, id) {
+    if ((state.users || []).some(x => String(x.id) === id)) return 'users';
+    if ((state.unused || []).some(x => String(x.id) === id)) return 'unused';
+    if ((state.trash || []).some(x => String(x.id) === id)) return 'trash';
+    return null;
+}
+
+function mapRegistryRow(row) {
+    return {
+        username: String(row?.username || ''),
+        usernameNorm: String(row?.usernameNorm ?? (row?.username_norm || '')),
+        firstRecordId: String(row?.firstRecordId ?? row?.first_record_id ?? ''),
+        firstSeen: row?.firstSeen ?? row?.first_seen ?? null,
+    };
+}
+// 按 status 分桶
+function bucketAppUserRows(rows) {
+    const users = [], unused = [], trash = [];
+    (rows || []).forEach(r => {
+        const rec = mapAppUserRow(r);
+        const st = String(r?.status || 'active');
+        if (st === 'unused') unused.push(rec);
+        else if (st === 'trash') trash.push(rec);
+        else users.push(rec);
+    });
+    return { users, unused, trash };
+}
+
 function normalizeDb(value) {
     const src = value && typeof value === 'object' ? value : {};
     return {
@@ -1130,7 +1255,7 @@ async function clearOperationLogs() {
     db.operationLogs = [];
     try {
         if (typeof supabaseClient !== 'undefined' && supabaseClient) {
-            await supabaseClient.from('operation_logs').delete().neq('id', '').maybeSingle();
+            await supabaseClient.from('operation_logs').delete().neq('id', ''); // 删除全部（maybeSingle 只允许单行会报错）
         }
     } catch (e) {
         console.warn('[operation_logs] 清空失败:', e.message || e);
@@ -1573,6 +1698,8 @@ async function enqueueBitJob(record, action, dedupeKey, options = {}) {
     resolveSupersededBitTasks();
     bitIntegrationAvailable = true;
     bitIntegrationMessage = '零SQL任务已写入MainData，等待本机连接器处理';
+    // 新建任务后立即刷新顶部按钮的待办计数，无需手动点开弹窗
+    refreshBitTaskBadge();
     return attachBitJob(record, job);
 }
 
@@ -1804,7 +1931,10 @@ function applyManualTaskCancellation(state, taskId, nowText = new Date().toISOSt
 }
 
 async function cancelBitTask(taskId) {
+    // 统一数据源：任务以 _bitTaskCache 为准，同步给 db 供下游使用
+    if (Array.isArray(_bitTaskCache)) db.bitTasks = _bitTaskCache;
     const localTask = (db.bitTasks || []).find(item => String(item.id) === String(taskId));
+    console.log('[cancel] dbTasks=', (db.bitTasks||[]).length, 'cacheTasks=', (_bitTaskCache||[]).length, 'target=', String(taskId), 'inDb=', !!(db.bitTasks||[]).some(t=>String(t.id)===String(taskId)), 'inCache=', !!(_bitTaskCache||[]).some(t=>String(t.id)===String(taskId)));
     if (!localTask) return alert('找不到这条任务，请先刷新。');
     if (!BIT_CANCELLABLE_STATUSES.has(String(localTask.status || ''))) {
         return alert(`该任务当前为“${BIT_STATUS_LABELS[localTask.status] || localTask.status}”，已经不能取消。`);
@@ -1813,11 +1943,12 @@ async function cancelBitTask(taskId) {
 
     showLoading(true, { blocking: false });
 
-    if (globalThis.__ownerSplitLoaded) {
+    if (true) { // P3-C: 恒走新表逻辑（原 ownerSplitLoaded 标记从未启用）
         showLoading(true, { blocking: false });
         try {
-            await syncFromCloud(true);
-            const latestTask = (db.bitTasks || []).find(item => String(item.id) === String(taskId));
+            // P3-C: 任务刷新改为直接从 bit_tasks 表拉（不再整包同步）
+            await loadBitTasksFromCloud(true);
+            const latestTask = ((Array.isArray(_bitTaskCache) ? _bitTaskCache : (db.bitTasks || []))).find(item => String(item.id) === String(taskId));
             if (!latestTask) {
                 render(); renderTrash();
                 alert('任务已不存在');
@@ -1843,7 +1974,7 @@ async function cancelBitTask(taskId) {
                 : result.restoredUsername
                     ? '✅ 修改用户名任务已取消，网页用户名已恢复为修改前的名称。'
                     : '✅ 任务已取消，联动程序不会再执行这条任务。');
-            saveToCloud(true);
+            saveToCloud(true);            // 同步取消独立表 bit_tasks（任务真实在独立表，MainData 只是兼容副本）            try {                await supabaseClient.from('bit_tasks')                    .update({ status: 'cancelled' })                    .eq('id', taskId);            } catch (e) { console.warn('[bit_tasks] 取消同步失败:', e.message || e); }
         } catch (error) {
             alert(`❌ 取消任务失败：
 ${bitSetupMessage(error)}`);
@@ -1881,13 +2012,8 @@ ${bitSetupMessage(error)}`);
                 return;
             }
 
-            const saveResult = await supabaseClient.from('MainData')
-                .update({ content: cloudState, updated_at: nowText })
-                .eq('id', ROW_ID)
-                .eq('updated_at', data.updated_at)
-                .select('updated_at');
-            if (saveResult.error) throw saveResult.error;
-            if (saveResult.data && saveResult.data.length > 0) {
+            // P3-C: 不再整包写 MainData（状态已写 bit_tasks 独立表）
+            {
                 db = cloudState;
                 baseSnapshot = JSON.parse(JSON.stringify(db));
                 lastKnownUpdatedAt = nowText;
@@ -1900,7 +2026,7 @@ ${bitSetupMessage(error)}`);
                     : result.restoredUsername
                         ? '✅ 修改用户名任务已取消，网页用户名已恢复为修改前的名称。'
                         : '✅ 任务已取消，联动程序不会再执行这条任务。');
-                return;
+                // 同步取消独立表 bit_tasks                try {                    await supabaseClient.from('bit_tasks')                        .update({ status: 'cancelled' })                        .eq('id', taskId);                } catch (e) { console.warn('[bit_tasks] 取消同步失败:', e.message || e); }                return;
             }
             await new Promise(resolve => setTimeout(resolve, 80 * (attempt + 1)));
         }
@@ -1962,14 +2088,15 @@ function bitBadgeForRecord(record) {
 }
 
 async function clearBitTaskLogs() {
-    const localCount = (db.bitTasks || []).filter(task => BIT_LOG_STATUSES.has(String(task.status || ''))).length;
+    const taskSrc = Array.isArray(_bitTaskCache) ? _bitTaskCache : (db.bitTasks || []);
+    const localCount = taskSrc.filter(task => BIT_LOG_STATUSES.has(String(task.status || ''))).length;
     if (!localCount) return alert('当前没有可清除的历史任务日志。');
     if (!(await showActionConfirm(`确定清除 ${localCount} 条已完成、已解决或已取消的任务日志？\n\n待执行、执行中、等待重试和需人工处理的任务会继续保留。`, { title:'清除任务日志', confirmText:'确认清除', danger:true }))) return;
     if (_isSaving || _hasPendingSave) return alert('当前数据正在保存，请等顶部显示保存成功后再清空任务日志。');
 
     showLoading(true, { blocking: false });
 
-    if (globalThis.__ownerSplitLoaded) {
+    if (true) { // P3-C: 恒走新表逻辑（原 ownerSplitLoaded 标记从未启用）
         try {
             await syncFromCloud(true);
             const removedIds = new Set((db.bitTasks || [])
@@ -1981,7 +2108,15 @@ async function clearBitTaskLogs() {
                 return;
             }
             db.bitTasks = (db.bitTasks || []).filter(task => !removedIds.has(String(task.id)));
+            // P3-C: 同步清 _bitTaskCache（弹窗渲染用 _bitTaskCache，不清则点击立即刷新仍显示旧历史）
+            if (Array.isArray(_bitTaskCache)) _bitTaskCache = _bitTaskCache.filter(task => !removedIds.has(String(task.id)));
             clearBitTaskReferences(db, removedIds);
+            // P3-C: 真正删除 bit_tasks 表里的历史任务
+            try {
+                await supabaseClient.from('bit_tasks')
+                    .delete()
+                    .in('status', ['success', 'cancelled', 'resolved']);
+            } catch (delErr) { console.warn('[bit_tasks] 删除历史失败:', delErr.message || delErr); }
             baseSnapshot = JSON.parse(JSON.stringify(db));
             render(); renderTrash();
             saveToCloud(true);
@@ -2031,14 +2166,18 @@ ${bitSetupMessage(error)}`);
 
             cloudState.bitTasks = (cloudState.bitTasks || []).filter(task => !removedIds.has(String(task.id)));
             clearBitTaskReferences(cloudState, removedIds);
+            
+            // 独立表 bit_tasks 也删除历史（任务日志真实存在这里，MainData 只是兼容位）
+            try {
+                await supabaseClient.from('bit_tasks')
+                    .delete()
+                    .in('status', ['success', 'cancelled', 'resolved']);
+            } catch (delErr) {
+                console.warn('[bit_tasks] 删除历史失败:', delErr.message || delErr);
+            }
             const nowText = new Date().toISOString();
-            const saveResult = await supabaseClient.from('MainData')
-                .update({ content: cloudState, updated_at: nowText })
-                .eq('id', ROW_ID)
-                .eq('updated_at', data.updated_at)
-                .select('updated_at');
-            if (saveResult.error) throw saveResult.error;
-            if (saveResult.data && saveResult.data.length > 0) {
+            // P3-C: 不再整包写 MainData（状态已写 bit_tasks 独立表）
+            {
                 db = cloudState;
                 baseSnapshot = JSON.parse(JSON.stringify(db));
                 lastKnownUpdatedAt = nowText;
@@ -2168,8 +2307,10 @@ async function refreshBitIntegrationLight() {
     bitConnectorRoutes = activeConnectors.filter(connector =>
         connectorPrefixes(connector).length || connectorManualAccounts(connector).length
     ).map(connector => {
-        const lastSeen = connector.lastSeen || connector.last_seen || null;
-        const seenAt = lastSeen ? new Date(lastSeen).getTime() : 0;
+            // P3-C: 在线判定优先用心跳表（联动工具最近上报），无则退回连接器对象上的时间
+            const _beatRow = (typeof connectorHeartbeatById !== 'undefined') ? connectorHeartbeatById.get(String(connector.id || '')) : null;
+            const lastSeen = (_beatRow && (_beatRow.last_seen || _beatRow.lastSeen)) || connector.lastSeen || connector.last_seen || null;
+            const seenAt = lastSeen ? new Date(lastSeen).getTime() : 0;
         return {
             connector_id: connector.id,
             display_name: connector.displayName || connector.display_name || '未命名连接器',
@@ -2273,7 +2414,8 @@ async function refreshBitIntegration(silent = true) {
         if (changed && _changedReasons.length) {
             console.warn('[refreshBitIntegration] changed by:', _changedReasons.join(', '));
         }
-        if (changed && lastKnownUpdatedAt && !_hasPendingSave) {
+        // P3-C: registry 变化由 get_meta 新表维护，不触发整包保存（否则每次同步都静默上传）
+        if ((_changedCollect || _changedSuperseded || _changedRoute) && lastKnownUpdatedAt && !_hasPendingSave) {
             const _nowMs = Date.now();
             if (_nowMs - _lastBitIntegrationSaveAt >= 10000) {
                 _lastBitIntegrationSaveAt = _nowMs;
@@ -2330,7 +2472,14 @@ async function syncConnectors(silent = true) {
 }
 
 async function processExpiredUsers() {
-    const expired = db.users.filter(user => getStatus(user.expiry) === 'expired' && !activeWindowPaymentLock(user));
+    // 跳过有“恢复/续费(recover)任务在途”的用户：recover 刚创建、仍生效前，
+    // 不能按旧 expiry 判定过期并移回回收站（否则会出现“手机续费成功、电脑端又回退”）。
+    const hasActiveRecover = (user) => (db.bitTasks || []).some(t =>
+        String(t.action || '') === 'recover' &&
+        ['pending', 'processing', 'retry_wait', 'routing_required', 'needs_attention'].includes(String(t.status || '')) &&
+        String(t.username || '').trim().toLowerCase() === String(user.username || '').trim().toLowerCase()
+    );
+    const expired = db.users.filter(user => getStatus(user.expiry) === 'expired' && !activeWindowPaymentLock(user) && !hasActiveRecover(user));
     if (!expired.length) return 0;
     let moved = 0;
     for (const user of expired) {
@@ -2349,6 +2498,7 @@ async function processExpiredUsers() {
 // 第 2 步：任务窗口改查 bit_tasks 独立表
 let _bitTaskCache = null;         // 最近一次从 bit_tasks 查到的任务（null=未加载）
 let _bitTaskPollTimer = null;     // 任务窗口 10 秒轮询定时器
+let _bitBgPollTimer = null;       // 后台待办数 30 秒轮询定时器（弹窗关闭时运行）
 let _bitHistoryLoaded = false;    // 最近成功历史是否已加载（打开窗口一次，避免轮询重复拉）
 const BIT_TASK_ACTIVE_STATUSES = ['pending', 'processing', 'retry_wait', 'routing_required', 'needs_attention'];
 const BIT_TASK_PAGE_SIZE = 100;
@@ -2372,7 +2522,8 @@ async function loadBitTasksFromCloud(force = false) {
         if (activeErr) { console.warn('[bit_tasks] active 读取失败:', activeErr.message); return _bitTaskCache || []; }
         // ② 最近成功历史：仅打开窗口/force 时加载一次，轮询阶段不重复拉
         let historyData = [];
-        if (force || !_bitHistoryLoaded) {
+        // P3-C: 每次轮询都拉历史（cancelled/success 稳定显示，不再 60s 跳动）；任务量表小可接受
+        if (force || true) {
             const { data, error } = await scopeFilter(supabaseClient.from('bit_tasks').select(cols))
                 .in('status', ['success', 'resolved', 'cancelled'])
                 .order('created_at', { ascending: false })
@@ -2396,6 +2547,9 @@ async function loadBitTasksFromCloud(force = false) {
         });
         const merged = [...(historyData || []).map(mapRow), ...(activeData || []).map(mapRow)];
         _bitTaskCache = merged.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+        // P3-C: 同步到 db.bitTasks（任务不再来自 MainData；渲染/取消任务依赖 db.bitTasks）
+        if (!Array.isArray(db.bitTasks)) db.bitTasks = [];
+        db.bitTasks = _bitTaskCache;
         return _bitTaskCache;
     } catch (e) { console.warn('[bit_tasks] 读取异常:', e.message || e); return _bitTaskCache || []; }
 }
@@ -2404,9 +2558,13 @@ function closeBitLinkModal() {
     if (_bitTaskPollTimer) { clearInterval(_bitTaskPollTimer); _bitTaskPollTimer = null; }
     _bitHistoryLoaded = false;
     document.getElementById('bitLinkModal').classList.remove('open');
+    // 关闭弹窗后立即刷新一次按钮统计，并启动后台待办数轮询
+    refreshBitTaskBadge();
+    startBitBackgroundPoll();
 }
 
 async function openBitLinkModal() {
+    if (_bitBgPollTimer) { clearInterval(_bitBgPollTimer); _bitBgPollTimer = null; }
     document.getElementById('bitLinkModal').classList.add('open');
     try {
         await Promise.all([loadBitTasksFromCloud(true), syncConnectors(false)]);
@@ -2420,6 +2578,21 @@ async function openBitLinkModal() {
         }
         loadBitTasksFromCloud(false).then(() => renderBitIntegration());
     }, 10000);
+}
+
+// 后台待办数轮询：弹窗关闭 + 页面可见时每 30 秒刷新一次按钮统计，无需手动点开弹窗
+function refreshBitTaskBadge() {
+    loadBitTasksFromCloud(false).then(() => renderBitIntegration()).catch(() => {});
+}
+
+function startBitBackgroundPoll() {
+    if (_bitBgPollTimer) clearInterval(_bitBgPollTimer);
+    _bitBgPollTimer = setInterval(() => {
+        const modalOpen = document.getElementById('bitLinkModal')?.classList.contains('open');
+        if (modalOpen) return; // 弹窗打开时由 10 秒轮询负责
+        if (document.visibilityState !== 'visible') return;
+        refreshBitTaskBadge();
+    }, 30000);
 }
 
 async function refreshBitLinkData() {
@@ -2495,38 +2668,22 @@ async function syncFromCloud(silent = false) {
     _isSyncing = true;
     if (!silent) showLoading(true, { blocking: false });
     try {
-        // 先做轻量心跳：绝大多数轮询只返回 updated_at，不下载完整 content。
-        const { data: versionData, error: versionError } = await supabaseClient.from('MainData')
-            .select('updated_at')
-            .eq('id', ROW_ID)
-            .single();
-        if (versionError) throw versionError;
-        trackTraffic('mainData', 'version_read', 200);
-
-        // 心跳等待期间如果出现了本地修改，就不要继续拉取云端数据。
+        // P3-C：直接增量拉取（不再依赖 MainData 版本心跳；get_users_since 增量很轻）
         if (_isSaving || _hasPendingSave) {
-            console.log('[sync] 心跳请求期间发生本地修改，跳过此次同步');
+            console.log('[sync] 本地修改排队中，跳过此次同步');
             return;
         }
-
-        const cloudUpdatedAt = versionData?.updated_at || 'FRESH';
-        // 时间戳相同表示内容没有变化；使用“不相等”判断也能兼容云端数据回滚。
-        if (lastKnownUpdatedAt && cloudUpdatedAt === lastKnownUpdatedAt) {
-            document.getElementById('syncStatus').innerText = `✅ 已是最新 ${getBeijingTimeString()}`;
-            // 保留原有的本地状态刷新和到期处理，但不产生 content 下载。
-            await refreshBitIntegrationLight();
-            await processExpiredUsers();
-            render();
-            return;
-        }
-
-        // 只有首次同步或版本变化时，才下载完整 JSON。
-        const { data, error } = await supabaseClient.from('MainData')
-            .select('content, updated_at')
-            .eq('id', ROW_ID)
-            .single();
-        if (error) throw error;
-        trackTraffic('mainData', 'content_read', JSON.stringify(data && data.content ? data.content : '').length || 0);
+        // P3-C：不再整包下载 MainData.content，改为新表增量拉取
+        const curKey = (db._syncCursor) || '';
+        const cursorIso = curKey ? new Date(curKey).toISOString() : null;
+        const { data: userData, error: userErr } = await supabaseClient.rpc(
+            'get_users_since', { p_cursor: cursorIso, p_status: null });
+        if (userErr) throw userErr;
+        const userRows = (userData && Array.isArray(userData.rows)) ? userData.rows : [];
+        const isFull = !!(userData && userData.full === true);
+        const { data: metaData, error: metaErr } = await supabaseClient.rpc('get_meta', {});
+        if (metaErr) throw metaErr;
+        trackTraffic('mainData', 'content_read', 0);
 
         // 【防御性拦截】等待网络请求期间，用户又做了本地修改？
         if (_isSaving || _hasPendingSave) {
@@ -2535,15 +2692,29 @@ async function syncFromCloud(silent = false) {
             return;
         }
 
-        if (data && data.content) {
-            lastKnownUpdatedAt = data.updated_at || 'FRESH';
-            localStorage.setItem(STORAGE_KEY + '_version', lastKnownUpdatedAt);
-            // 兼容 content 可能是字符串或对象
-            let parsed = data.content;
-            if (typeof parsed === 'string') {
-                try { parsed = JSON.parse(parsed); } catch(e) { parsed = {}; }
+        {
+            const bucketed = bucketAppUserRows(userRows);
+            const conns = (metaData && Array.isArray(metaData.connectors) ? metaData.connectors : []).map(mapConnectorRow);
+            const regs = (metaData && Array.isArray(metaData.registry) ? metaData.registry : []).map(mapRegistryRow);
+            if (isFull) {
+                db = { ...db, users: bucketed.users, unused: bucketed.unused, trash: bucketed.trash, bitConnectors: conns, bitUsernameRegistry: regs };
+            } else {
+                const upsertById = (list, rows) => {
+                    (rows || []).forEach(rec => {
+                        const i = list.findIndex(x => String(x.id) === String(rec.id));
+                        if (i >= 0) list[i] = rec; else list.push(rec);
+                    });
+                };
+                upsertById(db.users, bucketed.users);
+                upsertById(db.unused, bucketed.unused);
+                upsertById(db.trash, bucketed.trash);
+                db.bitConnectors = conns;
+                db.bitUsernameRegistry = regs;
             }
-            db = normalizeDb(parsed);
+            const maxUpd = userRows.reduce((m, r) => (r && r.updated_at && r.updated_at > m) ? r.updated_at : m, curKey || '');
+            db._syncCursor = maxUpd || curKey || '';
+            lastKnownUpdatedAt = maxUpd || 'FRESH';
+            localStorage.setItem(STORAGE_KEY + '_version', lastKnownUpdatedAt);
             rebuildActiveConnectors();
             baseSnapshot = JSON.parse(JSON.stringify(db));
             localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
@@ -2589,6 +2760,7 @@ function scheduleCloudSave(delay = 500) {
 }
 
 function saveToCloud(silent = false) {
+    console.trace('[save] saveToCloud() called');
     // 同一批修改中只要包含一次人工编辑，这一批就不能按“可丢弃的静默保存”处理。
     _isSilentSave = _hasPendingSave ? (_isSilentSave && silent) : Boolean(silent);
     // 自动清理 30 天前的操作日志，减少 MainData.content 体积，从而减少每次全量下载流量
@@ -2625,7 +2797,8 @@ async function _doSaveToCloud() {
     const isSilent = _isSilentSave;
     // 必须在请求发出前制作完全独立的快照。之后的连续编辑不能改变本次请求和基线。
     const payload = snapshotMainData();
-    trackTraffic('mainData', 'write', JSON.stringify(payload).length || 0);
+    // P3-C: 不再整包写 MainData，真实写是 update_user_anon 单行 RPC（此处统计置 0，避免误导）
+    trackTraffic('mainData', 'write', 0);
     _hasPendingSave = false; // 进入实际保存过程
     _isSilentSave = true;
     _isSaving = true;
@@ -2647,66 +2820,90 @@ async function _doSaveToCloud() {
     const currentNow = new Date().toISOString();
     let conflictDetected = false;
     try {
-        // 写入前预检版本：如果云端版本已经变化，直接进入冲突合并，
-        // 避免先把 224KB 整包 PATCH 过去再失败，省下一次完整上传。
-        if (lastKnownUpdatedAt !== 'FRESH') {
-            const { data: _verData, error: _verError } = await supabaseClient.from('MainData')
-                .select('updated_at').eq('id', ROW_ID).single();
-            trackTraffic('mainData', 'version_read', 200);
-            if (!_verError && _verData && _verData.updated_at !== lastKnownUpdatedAt) {
-                console.log('[save] 预检发现云端版本已变化，跳过整包写入，直接进入冲突合并');
-                conflictDetected = true;
-                clearTimeout(_saveTimer);
-                _saveTimer = null;
-                _hasPendingSave = true;
-                if (!isSilent) _isSilentSave = false;
-                statusEl.innerHTML = `<span style="color:var(--warning); font-weight:bold;">☁️ 冲突解决中，自动合并...</span>`;
-                const resolved = await autoResolveConflict();
-                if (!resolved && !_saveRetryTimer) {
-                    _saveRetryTimer = setTimeout(() => {
-                        _saveRetryTimer = null;
-                        if (_hasPendingSave && !_isSaving) _doSaveToCloud();
-                    }, 3000);
-                }
-                return;
-            }
-        }
-        let opResult;
-        if (lastKnownUpdatedAt === 'FRESH') {
-            opResult = await supabaseClient.from('MainData')
-                .upsert({ id: ROW_ID, content: payload, updated_at: currentNow })
-                .select('updated_at');
-        } else {
-            // 附带并发检查条件的 update 操作
-            opResult = await supabaseClient.from('MainData')
-                .update({ content: payload, updated_at: currentNow })
-                .eq('id', ROW_ID)
-                .eq('updated_at', lastKnownUpdatedAt)
-                .select('updated_at');
-        }
-
-        if (opResult.error) throw opResult.error;
-
-        if (lastKnownUpdatedAt !== 'FRESH' && (!opResult.data || opResult.data.length === 0)) {
-            console.log("[save] 并发冲突，启动三向合并自愈机制");
-            conflictDetected = true;
-            clearTimeout(_saveTimer);
-            _saveTimer = null;
-            _hasPendingSave = true;
-            if (!isSilent) _isSilentSave = false;
-            statusEl.innerHTML = `<span style="color:var(--warning); font-weight:bold;">☁️ 冲突解决中，自动合并...</span>`;
-            const resolved = await autoResolveConflict();
-            if (!resolved && !_saveRetryTimer) {
-                _saveRetryTimer = setTimeout(() => {
-                    _saveRetryTimer = null;
-                    if (_hasPendingSave && !_isSaving) _doSaveToCloud();
-                }, 3000);
-            }
+        // P3-C: 不再写 MainData，冲突由 update_user_anon 乐观锁拦截（无版本预检）
+        // P3-C: diff 出变化用户，逐个单行写（update_user_anon / insert_user_anon），不再整包 PATCH MainData
+        const baseState = baseSnapshot || { users: [], unused: [], trash: [] };
+        const payloadState = { users: payload.users || [], unused: payload.unused || [], trash: payload.trash || [] };
+        const bucketOf = (state, id) => {
+            if ((state.users || []).some(x => String(x.id) === String(id))) return 'users';
+            if ((state.unused || []).some(x => String(x.id) === String(id))) return 'unused';
+            if ((state.trash || []).some(x => String(x.id) === String(id))) return 'trash';
+            return null;
+        };
+        const allIds = new Set();
+        for (const b of ['users', 'unused', 'trash']) for (const r of (payloadState[b] || [])) allIds.add(String(r.id));
+        // P3-C: baseSnapshot 未就绪时跳过（避免刷新后 base 与 db 未对齐造成全量误写）
+        const baseTotal = (baseState.users?.length||0) + (baseState.unused?.length||0) + (baseState.trash?.length||0);
+        if (baseTotal === 0 && allIds.size > 50) {
+            console.warn('[save] baseSnapshot 未就绪，跳过本轮保存，等待同步');
+            _hasPendingSave = false;
+            statusEl.innerText = "☁️ 等待同步后保存...";
+            _isSaving = false;
             return;
         }
-
-        lastKnownUpdatedAt = opResult.data?.[0]?.updated_at || currentNow;
-        localStorage.setItem(STORAGE_KEY + '_version', lastKnownUpdatedAt);
+        let writeErrors = 0;
+        let writeCount = 0;
+        const statusForBucket = { users: 'active', unused: 'unused', trash: 'trash' };
+        for (const id of allIds) {
+            let rec = null;
+            for (const b of ['users', 'unused', 'trash']) {
+                const found = (payloadState[b] || []).find(r => String(r.id) === id);
+                if (found) { rec = found; break; }
+            }
+            if (!rec) continue;
+            // P3-C 止血：只写明确被编辑过的用户（_dirty），不 diff 全表            if (!rec._dirty) continue;            const baseRec = (() => {
+                for (const b of ['users', 'unused', 'trash']) {
+                    const f = (baseState[b] || []).find(r => String(r.id) === id);
+                    if (f) return f;
+                }
+                return null;
+            })();
+            if (!baseRec) {
+                // 全新用户：insert
+                const curBucket = bucketOf(payloadState, id) || 'users';
+                const ins = userToInsertPayload(rec, statusForBucket[curBucket]);
+                const { error: insErr } = await supabaseClient.rpc('insert_user_anon', { p_user: ins });
+                if (insErr) { console.warn('[save] insert_user_anon 失败:', insErr.message, id); writeErrors++; } else { writeCount++; }
+            } else {
+                // 已有用户：diff 字段 + 桶变更为 status
+                const changes = diffUserFields(baseRec, rec);
+                // 无 updatedAt（base 记录未确认云端时间）→ 跳过：避免空乐观锁导致全量 CONCURRENT_MODIFICATION
+                // dirty 用户=明确人工操作，即使无 updatedAt 也写（null 乐观锁覆盖）；非 dirty 才跳过防假变化                if (!rec._dirty && !baseRec.updatedAt && Object.keys(changes).length) {
+                    console.warn('[save] 跳过无 updatedAt 记录（防乐观锁冲突）:', id);
+                    continue;
+                }
+                const baseBucket = bucketOf(baseState, id) || 'users';
+                const curBucket = bucketOf(payloadState, id) || baseBucket;
+                if (curBucket !== baseBucket) changes.status = statusForBucket[curBucket];
+                if (Object.keys(changes).length) {
+                    const { error: upErr } = await supabaseClient.rpc('update_user_anon', {
+                        p_user_id: id, p_changes: changes,
+                        // dirty 用户=人工明确操作：不做乐观锁（避免云端 updated_at 与前端不一致时永远冲突无法写入）                        p_expected_updated_at: null,
+                    });
+                    if (upErr) {
+                        // CONCURRENT_MODIFICATION：云端已被他人/联动工具更新，本地视为已同步（跳过，避免无限重试上传）
+                        if (String(upErr.message || '').includes('CONCURRENT_MODIFICATION')) {
+                            console.warn('[save] 乐观锁冲突跳过（接受云端）:', id);
+                            // 用云端最新 updatedAt 更新 baseSnapshot，下轮不再误判
+                            if (baseSnapshot) {
+                                const listNames = ['users', 'unused', 'trash'];
+                                for (const b of listNames) {
+                                    const br = (baseSnapshot[b] || []).find(x => String(x.id) === String(id));
+                                    if (br) br.updatedAt = rec.updatedAt || br.updatedAt;
+                                }
+                            }
+                        } else {
+                            console.warn('[save] update_user_anon 失败:', upErr.message, id);
+                            writeErrors++;
+                        }
+                    } else { writeCount++; }
+                }
+            }
+        }
+        // 清 dirty（成功用户清掉；冲突/失败保留等下轮）        for (const id of allIds) {            for (const bb of ['users', 'unused', 'trash']) {                const r = (payloadState[bb] || []).find(x => String(x.id) === String(id));                if (r) { delete r._dirty; }            }        }        if (writeErrors) {
+            console.error('[save]', writeErrors, '个用户单行写失败');
+        }
+        localStorage.setItem(STORAGE_KEY + '_version', currentNow);
         baseSnapshot = snapshotMainData(payload);
         if (_saveRevision !== revisionAtStart) {
             _hasPendingSave = true;
@@ -2738,15 +2935,19 @@ async function autoResolveConflict(showMask = false) {
     let latestData = null;
     let latestUpdatedAt = null;
     try {
-        const { data, error } = await supabaseClient.from('MainData').select('content, updated_at').eq('id', ROW_ID).single();
-        if (error) throw error;
-        trackTraffic('mainData', 'content_read', JSON.stringify(data && data.content ? data.content : '').length || 0);
-        if (data && data.content) {
-            latestUpdatedAt = data.updated_at;
-            let parsed = data.content;
-            if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch(e) { parsed = {}; } }
-            latestData = normalizeDb(parsed);
-        }
+        // P3-C: 冲突合并所需云端最新数据也改为新表拉取（不再整包下载 MainData）
+        const { data: uData, error: uErr } = await supabaseClient.rpc('get_users_since', { p_cursor: null, p_status: null });
+        if (uErr) throw uErr;
+        const { data: mData, error: mErr } = await supabaseClient.rpc('get_meta', {});
+        if (mErr) throw mErr;
+        trackTraffic('mainData', 'content_read', 0);
+        latestUpdatedAt = new Date().toISOString();
+        const bucketed = bucketAppUserRows((uData && uData.rows) || []);
+        latestData = normalizeDb({
+            users: bucketed.users, unused: bucketed.unused, trash: bucketed.trash,
+            bitConnectors: ((mData && mData.connectors) || []).map(mapConnectorRow),
+            bitUsernameRegistry: ((mData && mData.registry) || []).map(mapRegistryRow),
+        });
     } catch (err) {
         console.error("抓取最新数据合并失败", err);
         if (showMask) showLoading(false);
@@ -3161,7 +3362,13 @@ function render(forceSort = false) {
         if(String(u.id) === String(priorityUserId)) tr.style.background = "rgba(240,165,0,0.15)";
 
         const owner = escapeHtml(displayVal(u.owner));
-        const windows = escapeHtml(displayVal(withDefault(u.windows, DEFAULT_WINDOWS)));
+        // 窗口列：联动工具同步了 bitExistingWindows/bitWindowQuota 时显示“已用/额度”
+        const _usedWin = Number(u.bitExistingWindows);
+        const _quotaWin = Number(u.bitWindowQuota);
+        const hasWinSync = Number.isFinite(_usedWin) && Number.isFinite(_quotaWin) && _quotaWin > 0;
+        const windows = hasWinSync
+            ? escapeHtml(`${Math.round(_usedWin)}/${Math.round(_quotaWin)}`)
+            : escapeHtml(displayVal(withDefault(u.windows, DEFAULT_WINDOWS)));
         const username = escapeHtml(displayVal(u.username));
         const password = escapeHtml(displayVal(withDefault(u.password, DEFAULT_PWD)));
         const wechat = escapeHtml(displayVal(u.wechat));
@@ -3330,19 +3537,23 @@ function renderTrash() {
 
 function toggleStar(id) {
     const u = db.users.find(x => x.id === id);
-    if(u) { u.isStarred = !u.isStarred; saveToCloud(); render(true); }
+    if(u) { u.isStarred = !u.isStarred; u._dirty = true; saveToCloud(); render(true); }
 }
 
+// 激活防并发重复锁（双击/重复提交保护）
+const _activatingIds = new Set();
 async function activate(id) {
+    if (_activatingIds.has(String(id))) return;
+    _activatingIds.add(String(id));
     const u = db.unused.find(x => x.id === id);
-    if(!u) return;
+    if(!u) { _activatingIds.delete(String(id)); return; }
     if (!(await showActionConfirm(`确定激活“${u.username}”？\n\n窗口数${unusedWindows(u)}\n本次激活无需支付。`, { title:'激活确认', confirmText:'确认激活' }))) return;
     const operationClickedAt = new Date().toISOString();
     if (!(await ensureCloudInitializedForAction())) return;
 
     // ── 激活前先拉云端最新数据，防止两人同时激活同一个名额 ──
     showLoading(true);
-    if (globalThis.__ownerSplitLoaded) {
+    if (true) { // P3-C: 恒走新表逻辑（原 ownerSplitLoaded 标记从未启用）
         await syncFromCloud(true);
         if (!db.unused.some(x => x.id === id)) {
             showLoading(false);
@@ -3352,30 +3563,24 @@ async function activate(id) {
         }
     } else {
         try {
-            const { data, error } = await supabaseClient.from('MainData').select('content, updated_at').eq('id', ROW_ID).single();
-            if (!error && data && data.content) {
-                let parsed = data.content;
-                if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch(e) { parsed = {}; } }
-                const cloudUnused = (parsed.unused || []);
-                const stillAvailable = cloudUnused.some(x => x.id === id);
-                if (!stillAvailable) {
-                    showLoading(false);
-                    alert('⚠️ 手慢了！\n\n您要激活的名额【' + u.username + '】已被其他同事抢先激活！\n\n系统将自动为您刷新最新数据。');
-                    lastKnownUpdatedAt = data.updated_at || 'FRESH';
-            localStorage.setItem(STORAGE_KEY + '_version', lastKnownUpdatedAt);
-                    db = normalizeDb(parsed);
-                    baseSnapshot = JSON.parse(JSON.stringify(db));
-                    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-                    document.getElementById('syncStatus').innerText = `✅ 云端同步 ${getBeijingTimeString()}`;
-                    render();
-                    return;
-                }
-                if (!_hasPendingSave && !_isSaving) {
-                    lastKnownUpdatedAt = data.updated_at || 'FRESH';
-            localStorage.setItem(STORAGE_KEY + '_version', lastKnownUpdatedAt);
-                    db = normalizeDb(parsed);
-                    baseSnapshot = JSON.parse(JSON.stringify(db));
-                }
+            // P3-C: 轻量 unused 拉取校验（不再整包下载 MainData）
+            const { data: uData, error: uErr } = await supabaseClient.rpc('get_users_since', { p_cursor: null, p_status: 'unused' });
+            if (uErr) throw uErr;
+            const rows = (uData && uData.rows) || [];
+            const cloudUnused = rows.map(mapAppUserRow);
+            const stillAvailable = cloudUnused.some(x => x.id === id);
+            if (!stillAvailable) {
+                showLoading(false);
+                alert('⚠️ 手慢了！\n\n您要激活的名额【' + u.username + '】已被其他同事抢先激活！\n\n系统已刷新最新数据。');
+                db.unused = cloudUnused;
+                baseSnapshot = JSON.parse(JSON.stringify(db));
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+                render();
+                return;
+            }
+            if (!_hasPendingSave && !_isSaving) {
+                db.unused = cloudUnused;
+                baseSnapshot = JSON.parse(JSON.stringify(db));
             }
         } catch(e) {
             console.warn('[activate] 激活前验证失败，继续本地激活', e);
@@ -3400,10 +3605,11 @@ async function activate(id) {
 
     newlyActivatedId = id;
     const activatedUser = { id: id, username: slot.username, password: slot.password, owner: '-', wechat: '-', xianyu: '-', amount: DEFAULT_AMOUNT, windows: String(unusedWindows(slot)), activeTime, expiry: `${ey}-${em}-${eday}`, isStarred: false };
-    db.users.push(activatedUser);
+    activatedUser._dirty = true;    db.users.push(activatedUser);
     db.unused = db.unused.filter(x => x.id !== id);
     recordOperationLog(activatedUser, 'activate', { operatedAt: operationClickedAt, expiryAfter: activatedUser.expiry });
     saveToCloud(); render();
+    _activatingIds.delete(String(id));
 }
 
 let renewalConfirmResolver = null;
@@ -3472,7 +3678,7 @@ async function quickRenew(id) {
     const renewAmountShow = renewAmountCents !== null ? formatMoneyCents(renewAmountCents) : null;
     if (!(await showRenewalConfirm(u, renewalPreviewExpiry, renewAmountShow))) return;
     const expiryBefore = String(u.expiry || '');
-    u.expiry = getRenewedExpiry(u);
+    u.expiry = getRenewedExpiry(u);    u._dirty = true;
     recordOperationLog(u, 'renew', { operatedAt: operationClickedAt, expiryBefore, expiryAfter: u.expiry });
     saveToCloud(); render();
 }
@@ -3530,7 +3736,8 @@ async function confirmBatchRenew() {
         changed = true;
     }
     cancelBatchRenew();
-    if (changed) { saveToCloud(); render(); }
+    (pendingBatchRenew || []).forEach(r => { if (r && r.id) { const ur = db.users.find(x => String(x.id) === String(r.id)); if (ur) ur._dirty = true; } });
+        if (changed) { saveToCloud(); render(); }
     cancelSelect();
 }
 
@@ -3546,7 +3753,7 @@ async function moveUserToTrash(id, opts = {}) {
             user._bitPendingDisableKey = key;
             await enqueueBitJob(user, 'disable', key);
             delete user._bitPendingDisableKey;
-            db.trash.unshift(db.users.splice(idx, 1)[0]);
+            db.users[idx]._dirty = true;            db.trash.unshift(db.users.splice(idx, 1)[0]);
             if (!opts.noSave) saveToCloud();
             if (!opts.noRender) render();
             return true;
@@ -3574,7 +3781,7 @@ async function rollbackUser(id, opts = {}) {
     }
     if(idx > -1 && (needConfirm ? await showActionConfirm("回退到名额列表？", { title:'回退确认', confirmText:'确认回退' }) : true)) {
         const u = db.users.splice(idx, 1)[0];
-        db.unused.push({ id: u.id, username: u.username, password: u.password || DEFAULT_PWD, windows: String(u.windows || DEFAULT_WINDOWS) });
+        const rbSnap = { ...u, status: 'unused' }; delete rbSnap._dirty; rbSnap._dirty = true;        db.unused.push(rbSnap);
         if (!opts.noSave) saveToCloud();
         if (!opts.noRender) render();
         return true;
@@ -3632,7 +3839,7 @@ async function restore(id) {
             await enqueueBitJob(restored, 'recover', key);
             delete restored._bitPendingRecoverKey;
             db.trash.splice(idx, 1);
-            restored.expiry = newExpiry;
+            restored.expiry = newExpiry;            restored._dirty = true;
             delete restored.operated;
             newlyActivatedId = restored.id;
             db.users.push(restored);
@@ -3740,20 +3947,17 @@ async function confirmWindowChange() {
     if (!change) return alert('请输入最终窗口数（如 150、50），或输入相对变化（如 +50、-50）。');
     const { targetWindows, delta } = change;
     if (delta === 0) return alert(`当前已经是 ${currentWindows} 窗口，无需修改。`);
-    const baseCents = windowChangeBaseCentsForOwner(record.owner);
+    // 主 index 为管理员视图：改窗口不依赖金额/价格校验，金额仅作展示，计算失败不拦截
     const currentAmountCents = recordMonthlyAmountCents(record, true);
-    if (baseCents === null && !isUnassignedOwner(record.owner)) return alert('该用户归属没有配置窗口价格。请先把归属设置为“知音科技”“雪莲”“小强”或“安然宝贝”。');
     if (!Number.isSafeInteger(currentWindows) || currentWindows < 0 || targetWindows < 0) return alert('修改后的窗口数必须是大于等于 0 的整数。');
-    if (currentAmountCents === null) return alert('当前金额无效，请先修正金额。');
-    const newAmountCents = windowAmountCentsAfterChange(record, targetWindows, delta);
-    if (newAmountCents === null) {
-        if (isUnassignedOwner(record.owner) && currentWindows <= 0) return alert('无归属用户按现有金额比例计算时，当前窗口数必须大于 0。');
-        return alert('无法根据当前窗口数和金额计算修改后的月费。');
-    }
-    const remainingDays = delta > 0 ? remainingWindowServiceDays(record.expiry) : null;
-    if (delta > 0 && remainingDays === null) return alert('当前到期日期无效，无法计算还需支付金额，请先修正到期日期。');
-    const amountDueCents = delta > 0 ? proratedWindowIncreaseCents(currentAmountCents, newAmountCents, remainingDays) : 0;
-    if (delta > 0 && amountDueCents === null) return alert('无法根据月费差额和剩余天数计算还需支付金额。');
+    let newAmountCents = null;
+    let remainingDays = null;
+    let amountDueCents = null;
+    try {
+        newAmountCents = windowAmountCentsAfterChange(record, targetWindows, delta);
+        remainingDays = delta > 0 ? remainingWindowServiceDays(record.expiry) : null;
+        if (newAmountCents !== null && remainingDays !== null) { amountDueCents = proratedWindowIncreaseCents(currentAmountCents, newAmountCents, remainingDays); }
+    } catch (e) { /* 金额计算失败不阻塞改窗口 */ }
     {
         const _activeTask = activeWindowChangeTask(record);
         if (_activeTask) {
@@ -3787,8 +3991,8 @@ async function confirmWindowChange() {
             { targetWindowCount: targetWindows }
         );
         record.windows = targetWindows;
-        record.windowTarget = targetWindows;
-        record.amount = formatMoneyCents(newAmountCents);
+        record.windowTarget = targetWindows;        record._dirty = true;
+        record.amount = (newAmountCents !== null && newAmountCents >= 0) ? formatMoneyCents(newAmountCents) : record.amount;
         recordOperationLog(record, delta > 0 ? 'window_add' : 'window_reduce', {
             operatedAt: new Date().toISOString(),
             windows: targetWindows,
@@ -3797,10 +4001,11 @@ async function confirmWindowChange() {
         saveToCloud();
         render();
         closeWindowChangeModal();
-        const paymentNotice = delta > 0
-            ? `剩余 ${remainingDays} 天，还需支付 ¥${formatMoneyCents(amountDueCents)}（主管理页未发起付款）`
-            : '无需付款、不退款';
-        alert(`已提交修改窗口任务：${currentWindows} → ${targetWindows}；${paymentNotice}；月费已改为 ¥${record.amount}。`);
+        let paymentNotice = '无需付款、不退款';
+        if (delta > 0) {
+            paymentNotice = (amountDueCents !== null && amountDueCents >= 0 && remainingDays !== null) ? `剩余 ${remainingDays} 天，还需支付 ¥${formatMoneyCents(amountDueCents)}（主管理页未发起付款）` : '客户应付金额：请按差窗口数与月费另核算';
+        }
+        alert(`已提交修改窗口任务：${currentWindows} → ${targetWindows}；${paymentNotice}；月费已改为 ${record.amount}。`);
         return true;
     } catch (error) {
         alert(`修改窗口任务创建失败：\n${bitSetupMessage(error)}`);
@@ -3854,7 +4059,7 @@ async function confirmRenameUser() {
             newBitDedupeKey('rename', record, `${Date.now()}-${newUsername.toLowerCase()}`),
             { newUsername: newUsername }
         );
-        record.username = newUsername;
+        record.username = newUsername;    record._dirty = true;
         saveToCloud();
         render();
         closeRenameUserModal();
@@ -4061,7 +4266,7 @@ function makeEditable(el, id, field) {
                 return;
             }
         }
-        u[field] = field === 'amount' ? normAmount(newVal) : newVal;
+        u[field] = field === 'amount' ? normAmount(newVal) : newVal;        u._dirty = true;
         saveToCloud();
         const safeVal = escapeHtml(displayVal(newVal));
         el.innerHTML = field === 'username' ? `<b>${safeVal}</b>` : safeVal;
@@ -4144,7 +4349,7 @@ async function batchRestoreTrash() {
                 restored.expiry = newExpiry;
                 delete restored._bitPendingRecoverKey;
                 delete restored.operated;
-                db.users.push(restored);
+                restored._dirty = true;                db.users.push(restored);
                 recordOperationLog(restored, 'renew', { operatedAt: operationClickedAt, expiryBefore, expiryAfter: newExpiry });
                 activatedAny = true;
             } catch (error) {
@@ -4189,7 +4394,7 @@ async function batchRollbackTrash() {
     if (await showActionConfirm(`确定将选中的 ${ids.length} 项回退到待激活名额？`, { title:'批量回退确认', confirmText:'确认回退' })) {
         db.trash = db.trash.filter(u => {
             if(ids.includes(u.id)) {
-                db.unused.push({ id: u.id, username: u.username, password: u.password || DEFAULT_PWD, windows: String(u.windows || DEFAULT_WINDOWS) });
+                const rbSnap = { ...u, status: 'unused' }; delete rbSnap._dirty; rbSnap._dirty = true;                db.unused.push(rbSnap);
                 return false;
             }
             return true;
@@ -4280,7 +4485,7 @@ async function confirmExcelImportPreview() {
             return false;
         }
         await reserveBitUsernames(users);
-        users.forEach(user => db.users.push(user));
+        users.forEach(user => { user._dirty = true; db.users.push(user); });
         saveToCloud();
         render();
         const importedCount = users.length;
@@ -4509,6 +4714,8 @@ function showLoading(s, options = {}) {
     loadBitTasksFromCloud()
         .then(() => { renderBitIntegration(); })
         .catch(() => {});
+    // 启动后台待办数轮询（弹窗关闭时每 30 秒自动刷新）
+    startBitBackgroundPoll();
     // 页面加载即预取操作日志，保证按钮计数即时正确
     loadOperationLogsFromCloud()
         .then(() => { renderOperationLogs(); })
@@ -4517,25 +4724,10 @@ function showLoading(s, options = {}) {
 
 // 页面关闭前确保数据保存
 window.addEventListener('beforeunload', () => {
+    // P3-C: 关闭/刷新只保留本地缓存；云端为逐用户单行写（_doSaveToCloud 已自动完成），
+    // 不再整包 PATCH MainData（避免大 payload 上传 + 重新污染 MainData 造成分叉）
     const payload = buildMainDataPayload();
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    if (_hasPendingSave && lastKnownUpdatedAt && lastKnownUpdatedAt !== 'FRESH') {
-        const currentNow = new Date().toISOString();
-        const query = new URLSearchParams({ id: 'eq.1', updated_at: `eq.${lastKnownUpdatedAt}` });
-        try {
-            fetch(`${SUPABASE_URL}/rest/v1/MainData?${query.toString()}`, {
-                method: 'PATCH',
-                keepalive: true,
-                headers: {
-                    apikey: SUPABASE_KEY,
-                    Authorization: `Bearer ${SUPABASE_KEY}`,
-                    'Content-Type': 'application/json',
-                    Prefer: 'return=minimal'
-                },
-                body: JSON.stringify({ content: payload, updated_at: currentNow })
-            });
-        } catch (e) {}
-    }
 });
 </script>
 </body>
