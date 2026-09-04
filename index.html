@@ -2936,7 +2936,7 @@ async function autoResolveConflict(showMask = false) {
     let latestUpdatedAt = null;
     try {
         // P3-C: 冲突合并所需云端最新数据也改为新表拉取（不再整包下载 MainData）
-        const { data: uData, error: uErr } = await supabaseClient.rpc('get_users_since', { p_cursor: null, p_status: null });
+        const { data: uData, error: uErr } = await supabaseClient.rpc('get_users_since', { p_cursor: null, p_status: null, p_owner: null });
         if (uErr) throw uErr;
         const { data: mData, error: mErr } = await supabaseClient.rpc('get_meta', {});
         if (mErr) throw mErr;
@@ -3564,7 +3564,7 @@ async function activate(id) {
     } else {
         try {
             // P3-C: 轻量 unused 拉取校验（不再整包下载 MainData）
-            const { data: uData, error: uErr } = await supabaseClient.rpc('get_users_since', { p_cursor: null, p_status: 'unused' });
+            const { data: uData, error: uErr } = await supabaseClient.rpc('get_users_since', { p_cursor: null, p_status: 'unused', p_owner: null });
             if (uErr) throw uErr;
             const rows = (uData && uData.rows) || [];
             const cloudUnused = rows.map(mapAppUserRow);
