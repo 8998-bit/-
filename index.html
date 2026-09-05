@@ -3805,6 +3805,11 @@ async function permanentlyDelete(id) {
     showLoading(true, { blocking: false });
     try {
         await enqueueBitJob(record, 'delete', newBitDedupeKey('delete', record));
+        // P3-C: 物理删除 app_users 记录（anon 有 DELETE policy，直接删防止刷新后回收站复活）
+        try {
+            const { error: delErr } = await supabaseClient.from('app_users').delete().eq('id', String(id));
+            if (delErr) console.warn('[删除] app_users 物理删除失败:', delErr.message);
+        } catch (e) { console.warn('[删除] app_users 删除异常:', e.message); }
         db.trash = db.trash.filter(u => u.id !== id);
         saveToCloud();
         renderTrash();
