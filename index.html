@@ -4601,7 +4601,7 @@ async function confirmMultiUnused() {
         alert(`❌ 添加中止，用户名永久唯一校验失败：\n${bitSetupMessage(error)}`);
         return;
     }
-    toAdd.forEach(u => db.unused.push(u));
+    toAdd.forEach(u => { u._dirty = true; db.unused.push(u); });
     document.getElementById('multiUnusedInput').value = '';
     saveToCloud(); closeModal('multiUnusedModal'); render();
 }
