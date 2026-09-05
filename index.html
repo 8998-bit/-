@@ -2677,7 +2677,7 @@ async function syncFromCloud(silent = false) {
         const curKey = (db._syncCursor) || '';
         const cursorIso = curKey ? new Date(curKey).toISOString() : null;
         const { data: userData, error: userErr } = await supabaseClient.rpc(
-            'get_users_since', { p_cursor: cursorIso, p_status: null });
+            'get_users_since', { p_cursor: cursorIso, p_status: null, p_owner: null });
         if (userErr) throw userErr;
         const userRows = (userData && Array.isArray(userData.rows)) ? userData.rows : [];
         const isFull = !!(userData && userData.full === true);
