@@ -288,7 +288,7 @@
 
 <header class="header">
   <div style="display:flex; align-items:center">
-    <div class="logo">比特 <span style="font-size:0.7em;opacity:0.75">v0.0.2</span></div>
+    <div class="logo">比特 <span style="font-size:0.7em;opacity:0.75">v0.0.4</span></div>
     <span class="sync-info" id="syncStatus">连接中...</span>
   </div>
   <div style="display:flex; gap:8px;">
@@ -530,7 +530,7 @@
 
 <script>
 // ================== 核心配置 ==================
-const SUPABASE_URL = 'https://xlmnfzocrlqvbzzrdshr.supabase.co';const APP_VERSION = '0.0.2'; // 🏷 版本号：改版本时递增（左上角显示） 
+const SUPABASE_URL = 'https://xlmnfzocrlqvbzzrdshr.supabase.co';const APP_VERSION = '0.0.4'; // 🏷 版本号：改版本时递增（左上角显示） 
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhsbW5mem9jcmxxdmJ6enJkc2hyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ5ODMyMjAsImV4cCI6MjA5MDU1OTIyMH0.Pvhl7JTz-FmOZ6J_aT8kBRve3ZrjOIIVVekr4jTZXUM';
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const STORAGE_KEY = 'uf_v45_db:main';
@@ -882,9 +882,12 @@ const OPERATION_ACTION_LABELS = {
     activate: '激活', renew: '续费', rollback: '回退', trash: '删除（移入回收站）',
     permanent_delete: '彻底删除', rename: '修改用户名', profile_edit: '修改资料',
     edit_owner: '修改归属', edit_wechat: '修改微信', edit_xianyu: '修改咸鱼',
-    edit_active_time: '修改激活时间', edit_expiry: '修改到期日', edit_amount: '修改金额',
+    edit_active_time: '修改激活时间', edit_expiry: '修改到期日', edit_amount: '修改金额', edit_password: '修改密码',
     window_add: '增加窗口', window_reduce: '减少窗口', window_sync: 'BitBrowser窗口同步', delete: '删除'
 };
+const OPERATION_VISIBLE_ACTIONS = new Set([
+    'activate', 'trash', 'renew', 'permanent_delete', 'rollback', 'rename'
+]);
 
 
 function normAmount(v) {
@@ -946,7 +949,7 @@ function mapConnectorRow(row) {
 }
 // P3-C: saveToCloud 单行写辅助
 const _FIELD_MAP = [
-    ['status', 'status'], ['owner', 'owner'], ['wechat', 'wechat'], ['xianyu', 'xianyu'],
+    ['status', 'status'], ['password', 'password'], ['owner', 'owner'], ['wechat', 'wechat'], ['xianyu', 'xianyu'],
     ['expiry', 'expiry'], ['windows', 'windows'], ['amount', 'amount'],
     ['isStarred', 'is_starred'], ['activeTime', 'active_time'], ['remark', 'remark'],
     ['bitWindowQuota', 'bit_window_quota'], ['bitExistingWindows', 'bit_existing_windows'],
@@ -1068,6 +1071,38 @@ function operationLogsInScope() {
     return db.operationLogs || [];
 }
 
+function findOperationLogRecord(item, state = db) {
+    const sourceId = String(item?.sourceRecordId || item?.source_record_id || '');
+    const username = String(item?.username || '').trim().toLowerCase();
+    const buckets = ['users', 'unused', 'trash'];
+    if (sourceId) {
+        for (const bucket of buckets) {
+            const record = (state[bucket] || []).find(row => String(row?.id || '') === sourceId);
+            if (record) return record;
+        }
+    }
+    if (username) {
+        for (const bucket of buckets) {
+            const record = (state[bucket] || []).find(row => String(row?.username || '').trim().toLowerCase() === username);
+            if (record) return record;
+        }
+    }
+    return null;
+}
+
+function effectiveRecordWindows(record, fallback = '') {
+    const syncedQuota = Number(record?.bitWindowQuota ?? record?.bit_window_quota);
+    if (Number.isFinite(syncedQuota) && syncedQuota > 0) return String(Math.round(syncedQuota));
+    const stored = record?.windows ?? fallback;
+    return stored === undefined || stored === null ? '' : String(stored);
+}
+
+function operationLogDisplayWindows(log) {
+    const stored = log?.windows === undefined || log?.windows === null ? '' : String(log.windows);
+    if (!['renew', 'edit_amount'].includes(String(log?.action || ''))) return stored;
+    return effectiveRecordWindows(findOperationLogRecord(log), stored);
+}
+
 function recordOperationLog(record, action, details = {}) {
     if (!record || !OPERATION_ACTION_LABELS[action]) return null;
     if (!Array.isArray(db.operationLogs)) db.operationLogs = [];
@@ -1082,7 +1117,7 @@ function recordOperationLog(record, action, details = {}) {
         operatedAt: String(details.operatedAt || new Date().toISOString()),
         expiryBefore: String(details.expiryBefore || ''),
         expiryAfter: String(details.expiryAfter || record.expiry || ''),
-        windows: String(details.windows ?? record.windows ?? ''),
+        windows: String(details.windows ?? effectiveRecordWindows(record, record.windows)),
         amount: String(details.paymentAmount ?? details.amount ?? record.amount ?? ''),
         paymentOrderNo: String(details.paymentOrderNo || ''),
         paymentIntentId: String(details.paymentIntentId || ''),
@@ -1139,7 +1174,78 @@ function formatOperationTime(value) {
 // 第 2 步：操作日志从 operation_logs 独立表读取（缓存到内存供窗口渲染）
 let _opLogCache = null;          // 最近一次从表查到的日志（null=未加载）
 let _opLogOwnerFilter = '';      // 老板页按 owner 过滤；主 index 为空=全部
+let _recoveryTaskLogCache = [];  // 成功恢复但子页面漏写 operation_logs 时的主页面只读兜底
 const OPERATION_LOG_PAGE_SIZE = 500;
+
+async function loadRecoveryTasksForOperationLogs() {
+    if (typeof supabaseClient === 'undefined' || !supabaseClient) return _recoveryTaskLogCache;
+    try {
+        let query = supabaseClient.from('bit_tasks')
+            .select('id,status,action,username,source_record_id,source_owner,result_code,created_at,completed_at')
+            .eq('action', 'recover')
+            .eq('status', 'success');
+        if (typeof TARGET_ORG !== 'undefined' && TARGET_ORG) query = query.eq('source_owner', String(TARGET_ORG));
+        else if (typeof DEFAULT_OWNER !== 'undefined' && DEFAULT_OWNER) query = query.eq('source_owner', String(DEFAULT_OWNER));
+        const { data, error } = await query.order('created_at', { ascending: false }).limit(OPERATION_LOG_PAGE_SIZE);
+        if (error) {
+            console.warn('[operation_logs] 恢复任务读取失败:', error.message);
+            return _recoveryTaskLogCache;
+        }
+        _recoveryTaskLogCache = (data || []).map(row => ({
+            id: row.id,
+            status: row.status,
+            action: row.action,
+            username: row.username,
+            sourceRecordId: row.source_record_id || '',
+            sourceOwner: row.source_owner || '',
+            resultCode: row.result_code || '',
+            createdAt: row.created_at || '',
+            completedAt: row.completed_at || ''
+        }));
+        return _recoveryTaskLogCache;
+    } catch (error) {
+        console.warn('[operation_logs] 恢复任务读取异常:', error?.message || error);
+        return _recoveryTaskLogCache;
+    }
+}
+
+function missingRecoveryOperationLogs(existingLogs) {
+    const logs = Array.isArray(existingLogs) ? existingLogs : [];
+    return (_recoveryTaskLogCache || []).flatMap(task => {
+        if (String(task?.action || '') !== 'recover' || String(task?.status || '') !== 'success') return [];
+        const taskId = String(task?.id || '');
+        const sourceId = String(task?.sourceRecordId || '');
+        const username = String(task?.username || '').trim().toLowerCase();
+        const taskTime = new Date(task?.createdAt || task?.completedAt || '').getTime();
+        const alreadyLogged = logs.some(log => {
+            if (String(log?.action || '') !== 'renew') return false;
+            const syncSource = String(log?.syncSource || log?.sync_source || '');
+            if (taskId && syncSource.includes(taskId)) return true;
+            const sameRecord = sourceId && String(log?.sourceRecordId || log?.source_record_id || '') === sourceId;
+            const sameUsername = username && String(log?.username || '').trim().toLowerCase() === username;
+            if (!sameRecord && !sameUsername) return false;
+            const logTime = new Date(log?.operatedAt || log?.operated_at || '').getTime();
+            return Number.isFinite(taskTime) && Number.isFinite(logTime) && Math.abs(logTime - taskTime) <= 15 * 60 * 1000;
+        });
+        if (alreadyLogged) return [];
+        const record = findOperationLogRecord(task);
+        return [{
+            id: `recovery-task:${taskId}`,
+            synthetic: true,
+            sourceRecordId: sourceId,
+            username: String(task?.username || record?.username || ''),
+            wechat: String(record?.wechat || ''),
+            owner: String(task?.sourceOwner || record?.owner || ''),
+            action: 'renew',
+            windows: effectiveRecordWindows(record, ''),
+            amount: String(record?.amount || ''),
+            operatedAt: String(task?.createdAt || task?.completedAt || ''),
+            expiryBefore: '',
+            expiryAfter: String(record?.expiry || ''),
+            syncSource: `bit_task:${taskId}`
+        }];
+    });
+}
 
 async function loadOperationLogsFromCloud(force = false) {
     if (_opLogCache && !force) return _opLogCache;
@@ -1165,6 +1271,7 @@ async function loadOperationLogsFromCloud(force = false) {
         // 表字段 snake_case → 渲染逻辑用的 camelCase
         _opLogCache = (data || []).map(r => ({
             id: r.id,
+            sourceRecordId: r.source_record_id || r.sourceRecordId || '',
             username: r.username,
             wechat: r.wechat,
             owner: r.owner,
@@ -1175,7 +1282,8 @@ async function loadOperationLogsFromCloud(force = false) {
             operatedAt: r.operated_at || r.operatedAt || '',
             expiryBefore: r.expiry_before || r.expiryBefore || '',
             expiryAfter: r.expiry_after || r.expiryAfter || '',
-            activeDate: r.active_date || r.activeDate || ''
+            activeDate: r.active_date || r.activeDate || '',
+            syncSource: r.sync_source || r.syncSource || ''
         }));
         // 表数据已加载；把本地尚未写入表的新日志合并进来，避免“出现一下就消失”
         const tableIds = new Set(_opLogCache.map(x => String(x.id || '')));
@@ -1193,15 +1301,16 @@ async function loadOperationLogsFromCloud(force = false) {
 
 function operationLogsInScope() {
     // 第 2 步：优先用独立表缓存；表未加载时回退本地 db.operationLogs
-    if (Array.isArray(_opLogCache)) return _opLogCache;
-    const logs = Array.isArray(db.operationLogs) ? db.operationLogs : [];
+    const baseLogs = Array.isArray(_opLogCache) ? _opLogCache : (Array.isArray(db.operationLogs) ? db.operationLogs : []);
+    let logs = baseLogs;
     if (typeof TARGET_ORG !== 'undefined' && TARGET_ORG) {
-        return logs.filter(l => String(l.owner || '') === String(TARGET_ORG));
+        logs = logs.filter(l => String(l.owner || '') === String(TARGET_ORG));
     }
-    if (typeof DEFAULT_OWNER !== 'undefined' && DEFAULT_OWNER) {
-        return logs.filter(l => String(l.owner || '') === String(DEFAULT_OWNER));
+    else if (typeof DEFAULT_OWNER !== 'undefined' && DEFAULT_OWNER) {
+        logs = logs.filter(l => String(l.owner || '') === String(DEFAULT_OWNER));
     }
-    return logs;
+    return [...logs, ...missingRecoveryOperationLogs(logs)]
+        .filter(log => OPERATION_VISIBLE_ACTIONS.has(String(log?.action || '')));
 }
 
 function renderOperationLogs() {
@@ -1220,19 +1329,19 @@ function renderOperationLogs() {
     const search = String(input?.value || '').trim().toLowerCase();
     const visible = search ? logs.filter(log => [
         log.username, log.wechat, log.owner, OPERATION_ACTION_LABELS[log.action] || log.action,
-        log.windows, log.amount, log.paymentAmount, formatOperationTime(log.operatedAt), log.expiryBefore, log.expiryAfter
+        operationLogDisplayWindows(log), log.amount, log.paymentAmount, formatOperationTime(log.operatedAt), log.expiryBefore, log.expiryAfter
     ].join(' ').toLowerCase().includes(search)) : logs;
     if (count) count.textContent = search ? `（搜索结果 ${visible.length}/${logs.length}）` : `（共 ${logs.length} 条）`;
     const rows = visible.map(log => {
         const encodedLogId = encodeURIComponent(String(log.id || '')).replace(/'/g, '%27');
-        const deleteButton = log.id
+        const deleteButton = log.id && !log.synthetic
             ? `<button class="operation-log-delete-btn" onclick="deleteOperationLog(decodeURIComponent('${encodedLogId}'))">删除</button>`
             : '-';
         return `<div class="operation-log-row">
             <div><b>${escapeHtml(log.username || '-')}</b></div>
             <div>${escapeHtml(log.wechat || '-')}</div>
             <div>${escapeHtml(OPERATION_ACTION_LABELS[log.action] || log.action || '-')}</div>
-            <div>${escapeHtml(log.windows || '-')}</div>
+            <div>${escapeHtml(operationLogDisplayWindows(log) || '-')}</div>
             <div>${(log.amount || log.paymentAmount) ? '¥' + escapeHtml(cleanAmount(log.amount || log.paymentAmount)) : '-'}</div>
             <div>${escapeHtml(formatOperationTime(log.operatedAt))}</div>
             <div>${escapeHtml(log.expiryBefore || '-')}</div>
@@ -1281,7 +1390,7 @@ async function clearOperationLogs() {
 async function openOperationLogModal() {
     document.getElementById('operationLogModal').classList.add('open');
     try {
-        await loadOperationLogsFromCloud(true);
+        await Promise.all([loadOperationLogsFromCloud(true), loadRecoveryTasksForOperationLogs()]);
     } catch (e) { /* 降级本地 */ }
     renderOperationLogs();
 }
@@ -3408,7 +3517,7 @@ function render(forceSort = false) {
             <td class="editable" data-f="owner">${owner}</td>
             <td>${windows}</td>
             <td class="detail-cell copy-on-click" title="${username}｜单击复制用户名"><b>${username}</b></td>
-            <td class="detail-cell copy-on-click" title="单击复制密码">${password}</td>
+            <td class="editable detail-cell copy-on-click" data-f="password" title="单击复制密码，双击修改">${password}</td>
             <td class="editable detail-cell" data-f="wechat">${wechat}</td>
             <td class="editable detail-cell" data-f="xianyu">${xianyu}</td>
             <td class="editable detail-cell" data-f="activeTime">${activeTime}</td>
@@ -4214,7 +4323,7 @@ function scheduleRenderWhenEditIdle(delay = 300) {
 }
 
 function makeEditable(el, id, field) {
-    const allowedFields = new Set(['owner', 'wechat', 'xianyu', 'activeTime', 'expiry', 'amount']);
+    const allowedFields = new Set(['owner', 'wechat', 'xianyu', 'password', 'activeTime', 'expiry', 'amount']);
     if (!allowedFields.has(field)) return;
     const record = db.users.find(x => x.id === id);
     if (record && ['owner', 'activeTime', 'expiry', 'amount'].includes(field) && blockForWindowPayment(record, `修改${field}`)) return;
@@ -4238,6 +4347,18 @@ function makeEditable(el, id, field) {
       const newVal = rawInput || '-';
       const u = db.users.find(x => x.id === id);
       if(u) {
+        if (field === 'password') {
+            if (!rawInput) {
+                alert('❌ 密码不能为空。');
+                render();
+                return;
+            }
+            if (rawInput.length > 100 || /[\u0000-\u001f]/.test(rawInput)) {
+                alert('❌ 密码不能包含控制字符，且最多100个字符。');
+                render();
+                return;
+            }
+        }
         if (field === 'windows') {
             if (!/^\d+$/.test(rawInput)) {
                 alert('❌ 可创建窗口总数必须是大于等于 0 的整数。');
@@ -4321,7 +4442,7 @@ function makeEditable(el, id, field) {
 
         const profileEditActions = {
 
-            owner: 'edit_owner', wechat: 'edit_wechat', xianyu: 'edit_xianyu',
+            owner: 'edit_owner', wechat: 'edit_wechat', xianyu: 'edit_xianyu', password: 'edit_password',
 
             activeTime: 'edit_active_time', expiry: 'edit_expiry', amount: 'edit_amount'
 
