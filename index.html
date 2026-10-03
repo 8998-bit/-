@@ -107,7 +107,7 @@
   .overlay.open { display: block; }
   .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.8); display:none; align-items:center; justify-content:center; z-index:1000; }
   .modal-overlay.open { display:flex; }
-  #renewalConfirmModal, #actionConfirmModal { z-index:2147483647 !important; position:fixed !important; isolation:isolate; }
+  #renewalConfirmModal, #actionConfirmModal, #adminDecisionModal { z-index:2147483647 !important; position:fixed !important; isolation:isolate; }
   .modal { background:var(--surface); padding:20px; border-radius:8px; width:380px; border:1px solid var(--border); }
   .renewal-confirm-modal { width:min(500px, calc(100vw - 24px)); border-color:rgba(240,165,0,.55); box-shadow:0 18px 60px rgba(0,0,0,.55); }
   .renewal-confirm-title { color:var(--accent); font-size:17px; margin-bottom:14px; }
@@ -136,7 +136,7 @@
   .bit-job-search { width:260px; max-width:48%; background:#000; border:1px solid var(--border); border-radius:5px; color:#fff; font-size:13px; padding:7px 10px; outline:none; }
   .bit-job-search:focus { border-color:var(--accent); }
   .bit-job-list { flex:1 1 auto; max-height:58vh; overflow:auto; min-height:180px; border:1px solid var(--border); border-radius:6px; -webkit-overflow-scrolling:touch; touch-action:pan-x pan-y; }
-  .bit-job-row { display:grid; grid-template-columns:minmax(165px,1.4fr) minmax(65px,.7fr) minmax(135px,1.15fr) minmax(72px,.65fr) minmax(140px,1.1fr) minmax(48px,.45fr) minmax(140px,1.15fr) minmax(56px,.55fr); width:100%; min-width:890px; box-sizing:border-box; gap:7px; align-items:center; padding:10px; border-bottom:1px solid var(--border); font-size:12px; line-height:1.35; }
+  .bit-job-row { display:grid; grid-template-columns:minmax(165px,1.4fr) minmax(65px,.7fr) minmax(135px,1.15fr) minmax(72px,.65fr) minmax(140px,1.1fr) minmax(48px,.45fr) minmax(140px,1.15fr) minmax(132px,1fr); width:100%; min-width:980px; box-sizing:border-box; gap:7px; align-items:center; padding:10px; border-bottom:1px solid var(--border); font-size:12px; line-height:1.35; }
   .bit-job-row.bit-job-header { position:sticky; top:0; background:var(--surface2); color:#90ee90; z-index:1; }
   .bit-job-row > div { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .bit-job-row:not(.bit-job-header) > div:nth-child(1),
@@ -147,6 +147,9 @@
   .bit-job-row .bit-badge { margin-top:0; padding:2px 6px; font-size:11px; }
   .bit-cancel-btn { padding:4px 7px; border-radius:4px; border:1px solid var(--danger); background:transparent; color:#ff8b96; font-size:10px; cursor:pointer; white-space:nowrap; }
   .bit-cancel-btn:hover { background:rgba(255,71,87,.15); }
+  .bit-task-actions { display:flex; align-items:center; gap:6px; overflow:visible !important; }
+  .bit-resolve-btn { padding:4px 7px; border-radius:4px; border:1px solid var(--success); background:transparent; color:var(--success); font-size:10px; cursor:pointer; white-space:nowrap; }
+  .admin-decision-options { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; margin-top:16px; }
   .bit-badge.success { color:var(--success); border-color:var(--success); }
   .bit-badge.resolved { color:var(--success); border-color:var(--success); }
   .bit-badge.pending, .bit-badge.processing, .bit-badge.retry_wait, .bit-badge.execution_succeeded, .bit-badge.writeback_pending, .bit-badge.routing_required { color:var(--warning); border-color:var(--warning); }
@@ -288,7 +291,7 @@
 
 <header class="header">
   <div style="display:flex; align-items:center">
-    <div class="logo">比特 <span style="font-size:0.7em;opacity:0.75">v0.0.5</span></div>
+    <div class="logo">比特 <span style="font-size:0.7em;opacity:0.75">v0.0.6</span></div>
     <span class="sync-info" id="syncStatus">连接中...</span>
   </div>
   <div style="display:flex; gap:8px;">
@@ -427,6 +430,16 @@
   </div>
 </div>
 
+<div class="modal-overlay" id="adminDecisionModal" onclick="if(event.target===this)resolveAdminDecision(null)" role="dialog" aria-modal="true" aria-labelledby="adminDecisionTitle">
+  <div class="modal renewal-confirm-modal">
+    <h3 class="renewal-confirm-title" id="adminDecisionTitle">管理员处理</h3>
+    <div class="renewal-confirm-summary">
+      <div id="adminDecisionMessage" style="color:#fff; font-size:14px; line-height:1.75; white-space:pre-line;"></div>
+    </div>
+    <div class="admin-decision-options" id="adminDecisionOptions"></div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="renameUserModal" onclick="if(event.target===this)closeRenameUserModal()">
   <div class="modal" style="width:min(460px, calc(100vw - 24px));">
     <h3 style="font-size:16px; color:var(--accent); margin-bottom:8px;">修改用户名</h3>
@@ -530,7 +543,7 @@
 
 <script>
 // ================== 核心配置 ==================
-const SUPABASE_URL = 'https://xlmnfzocrlqvbzzrdshr.supabase.co';const APP_VERSION = '0.0.5'; // 🏷 版本号：改版本时递增（左上角显示） 
+const SUPABASE_URL = 'https://xlmnfzocrlqvbzzrdshr.supabase.co';const APP_VERSION = '0.0.6'; // 🏷 版本号：改版本时递增（左上角显示） 
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhsbW5mem9jcmxxdmJ6enJkc2hyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ5ODMyMjAsImV4cCI6MjA5MDU1OTIyMH0.Pvhl7JTz-FmOZ6J_aT8kBRve3ZrjOIIVVekr4jTZXUM';
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const STORAGE_KEY = 'uf_v45_db:main';
@@ -2374,8 +2387,8 @@ function renderBitIntegration() {
             ? `${task.username || '-'} → ${newUsername}`
             : (task.username || '-');
         const encodedTaskId = encodeURIComponent(String(task.id || '')).replace(/'/g, '%27');
-        const cancelAction = status === 'needs_attention' && String(task.action || '') === 'delete'
-            ? `<button class="bit-cancel-btn" onclick="confirmManualExternalDelete(decodeURIComponent('${encodedTaskId}'), decodeURIComponent('${encodeURIComponent(String(task.username || '')).replace(/'/g, '%27')}'))">确认已手工删除</button>`
+        const cancelAction = status === 'needs_attention'
+            ? `<div class="bit-task-actions"><button class="bit-resolve-btn" onclick="resolveManualBitTask(decodeURIComponent('${encodedTaskId}'), 'completed')">已处理</button><button class="bit-cancel-btn" onclick="resolveManualBitTask(decodeURIComponent('${encodedTaskId}'), 'abandoned')">放弃</button></div>`
             : BIT_CANCELLABLE_STATUSES.has(status)
                 ? `<button class="bit-cancel-btn" onclick="cancelBitTask(decodeURIComponent('${encodedTaskId}'))">取消任务</button>`
                 : '-';
@@ -3775,6 +3788,40 @@ function resolveActionConfirm(confirmed) {
     if (resolve) resolve(Boolean(confirmed));
 }
 
+let adminDecisionResolver = null;
+
+function showAdminDecision(title, message, options) {
+    if (adminDecisionResolver) resolveAdminDecision(null);
+    document.getElementById('adminDecisionTitle').textContent = String(title || '管理员处理');
+    document.getElementById('adminDecisionMessage').textContent = String(message || '');
+    const container = document.getElementById('adminDecisionOptions');
+    container.innerHTML = '';
+    for (const option of options || []) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `btn ${option.className || 'btn-ghost'}`;
+        button.textContent = String(option.label || option.value || '');
+        button.addEventListener('click', () => resolveAdminDecision(option.value));
+        container.appendChild(button);
+    }
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn btn-ghost';
+    cancel.textContent = '取消';
+    cancel.addEventListener('click', () => resolveAdminDecision(null));
+    container.appendChild(cancel);
+    document.getElementById('adminDecisionModal').classList.add('open');
+    setTimeout(() => container.querySelector('button')?.focus(), 0);
+    return new Promise(resolve => { adminDecisionResolver = resolve; });
+}
+
+function resolveAdminDecision(value) {
+    document.getElementById('adminDecisionModal').classList.remove('open');
+    const resolve = adminDecisionResolver;
+    adminDecisionResolver = null;
+    if (resolve) resolve(value);
+}
+
 async function quickRenew(id) {
     const operationClickedAt = new Date().toISOString();
     if (!(await ensureCloudInitializedForAction())) return;
@@ -3993,8 +4040,6 @@ function openWindowChangeModal(id) {
     const record = db.users.find(item => String(item.id) === String(id));
     if (!record) return alert('找不到该用户，请刷新后重试。');
     if (blockForWindowPayment(record, '主管理页面修改窗口')) return;
-    const baseCents = windowChangeBaseCentsForOwner(record.owner);
-    if (baseCents === null && !isUnassignedOwner(record.owner)) return alert('该用户归属没有配置窗口价格。请先把归属设置为“知音科技”“雪莲”“小强”或“安然宝贝”。');
     pendingWindowChangeUserId = String(id);
     document.getElementById('windowChangeUser').textContent = `${record.username}：当前 ${record.windows || 0} 窗口，月费 ¥${formatMoneyCents(recordMonthlyAmountCents(record, true) ?? 0)}；微信：${displayVal(record.wechat)}\n归属：${record.owner}`;
     document.getElementById('windowChangeInput').value = '';
@@ -4024,12 +4069,16 @@ function updateWindowChangePreview() {
     }
     const baseCents = windowChangeBaseCentsForOwner(record.owner);
     const currentAmountCents = recordMonthlyAmountCents(record, true);
-    if (!Number.isSafeInteger(currentWindows) || currentWindows < 0 || targetWindows < 0 || currentAmountCents === null) {
-        preview.textContent = '当前窗口数、金额或修改后的窗口数无效。';
+    if (!Number.isSafeInteger(currentWindows) || currentWindows < 0 || targetWindows < 0) {
+        preview.textContent = '当前窗口数或修改后的窗口数无效。';
         return;
     }
     if (baseCents === null && !isUnassignedOwner(record.owner)) {
-        preview.textContent = '该用户归属没有配置窗口价格。';
+        preview.textContent = `${currentWindows} → ${targetWindows} 窗口；该归属未配置窗口价格，金额保持不变，请人工核算。`;
+        return;
+    }
+    if (currentAmountCents === null) {
+        preview.textContent = '当前金额无效，修改窗口后金额将保持不变。';
         return;
     }
     const newAmountCents = windowAmountCentsAfterChange(record, targetWindows, delta);
@@ -4105,7 +4154,7 @@ async function confirmWindowChange() {
         }
     }
     try {
-        await enqueueBitJob(
+        const windowTask = await enqueueBitJob(
             record,
             BIT_WINDOW_QUOTA_ACTION,
             newBitDedupeKey('window-quota', record, `${targetWindows}-${Date.now()}`),
@@ -4114,11 +4163,13 @@ async function confirmWindowChange() {
         record.windows = targetWindows;
         record.windowTarget = targetWindows;        record._dirty = true;
         record.amount = (newAmountCents !== null && newAmountCents >= 0) ? formatMoneyCents(newAmountCents) : record.amount;
-        recordOperationLog(record, delta > 0 ? 'window_add' : 'window_reduce', {
-            operatedAt: new Date().toISOString(),
-            windows: targetWindows,
-            amount: record.amount
-        });
+        if (!windowTask.webOnly) {
+            recordOperationLog(record, delta > 0 ? 'window_add' : 'window_reduce', {
+                operatedAt: new Date().toISOString(),
+                windows: targetWindows,
+                amount: record.amount
+            });
+        }
         saveToCloud();
         render();
         closeWindowChangeModal();
@@ -4506,7 +4557,7 @@ async function batchRestoreTrash() {
             const expiryBefore = String(restored.expiry || '');
             const newExpiry = getRenewedExpiry(restored);
             try {
-                await enqueueBitJob(restored, 'recover', newBitDedupeKey('recover', restored, `${newExpiry}-${Date.now()}`));
+                const recoverTask = await enqueueBitJob(restored, 'recover', newBitDedupeKey('recover', restored, `${newExpiry}-${Date.now()}`));
                 const idx = db.trash.findIndex(u => u.id === id);
                 if (idx < 0) continue;
                 db.trash.splice(idx, 1);
@@ -4514,7 +4565,9 @@ async function batchRestoreTrash() {
                 delete restored._bitPendingRecoverKey;
                 delete restored.operated;
                 restored._dirty = true;                db.users.push(restored);
-                recordOperationLog(restored, 'renew', { operatedAt: operationClickedAt, expiryBefore, expiryAfter: newExpiry });
+                if (!recoverTask.webOnly) {
+                    recordOperationLog(restored, 'renew', { operatedAt: operationClickedAt, expiryBefore, expiryAfter: newExpiry });
+                }
                 activatedAny = true;
             } catch (error) {
                 errors.push(`${restored.username}：${bitSetupMessage(error)}`);
@@ -4793,6 +4846,7 @@ function closeTopmostOverlay() {
         case 'windowChangeModal': closeWindowChangeModal(); break;
         case 'renewalConfirmModal': resolveRenewalConfirm(false); break;
         case 'actionConfirmModal': resolveActionConfirm(false); break;
+        case 'adminDecisionModal': resolveAdminDecision(null); break;
         case 'renameUserModal': closeRenameUserModal(); break;
         case 'multiUnusedModal': closeModal('multiUnusedModal'); break;
         case 'excelImportPreviewModal': closeExcelImportPreview(); break;
@@ -5089,6 +5143,11 @@ function showLoading(s, options = {}) {
         BLOCKED_BY_NEEDS_ATTENTION: '该账号有需要人工处理的任务，处理前不能创建新任务。',
         NO_CONNECTOR_SCOPE: '没有连接器负责该账号，请先检查连接器前缀。',
         AMBIGUOUS_CONNECTOR_SCOPE: '该账号同时命中多台连接器，请先修正连接器范围。',
+        CONNECTOR_DISABLED_OR_MISSING: '选择的连接器已停用或不存在，请刷新后重试。',
+        CONNECTOR_SCOPE_CHANGED: '该账号的连接器归属已变化，请刷新后重试。',
+        NOT_IN_NEEDS_ATTENTION: '该任务已不是需人工处理状态，请刷新。',
+        MANUAL_RESOLUTION_USERNAME_MISMATCH: '任务的员工号已变化，请刷新后重试。',
+        RESOLUTION_STATE_CONFLICT: '账号状态已变化，未强制收口，请刷新后核对。',
         NEW_USERNAME_TAKEN: '新用户名已被占用。',
         NEW_USERNAME_SCOPE_CONFLICT: '新用户名属于另一台连接器。',
         INVALID_STATE_FOR_ACTION: '账号云端状态已变化，请刷新后重试。',
@@ -5390,6 +5449,32 @@ function showLoading(s, options = {}) {
         catch (error) { console.warn('[v2 connectors] sync failed:', error.message || error); return false; }
     };
 
+    function adminConnectorLabel(connector) {
+        const prefixes = connectorPrefixes(connector).map(value => value.toLowerCase());
+        if (prefixes.includes('plw')) return 'PLW';
+        if (prefixes.includes('kwe')) return 'KWE';
+        return String(connector.displayName || connector.display_name || connector.id || '未命名连接器');
+    }
+
+    async function chooseAdminTaskRoute(record, action) {
+        try { await syncConnectorsV2(true); } catch (_) {}
+        const connectors = (activeConnectors || [])
+            .filter(connector => connector?.enabled !== false && connector?.id)
+            .map(connector => ({
+                value: String(connector.id),
+                label: `指派给 ${adminConnectorLabel(connector)}`,
+                className: 'btn-primary',
+                order: adminConnectorLabel(connector) === 'PLW' ? 0 : (adminConnectorLabel(connector) === 'KWE' ? 1 : 2)
+            }))
+            .sort((a, b) => a.order - b.order || a.label.localeCompare(b.label));
+        connectors.push({ value: '__web_only__', label: '仅处理网页记录', className: 'btn-danger', order: 9 });
+        return showAdminDecision(
+            '无连接器归属',
+            `员工号“${record.username || '-'}”没有匹配到联动工具。\n请指定今后负责该员工号的连接器，或明确选择只处理网页记录。\n操作：${BIT_ACTION_LABELS[action] || action}`,
+            connectors
+        );
+    }
+
     async function createTask(record, action, options = {}) {
         if (!record?.id) throw new Error('记录缺少 ID。');
         const intent = JSON.stringify({
@@ -5402,17 +5487,47 @@ function showLoading(s, options = {}) {
         const requestKey = STORAGE_KEY + ':taskRequest:' + encodeURIComponent(intent);
         const requestId = localStorage.getItem(requestKey) || uuid();
         localStorage.setItem(requestKey, requestId);
+        const rpcPayload = {
+            p_action: action,
+            p_source_record_id: String(record.id),
+            p_request_id: requestId,
+            p_target_window_count: options.targetWindowCount ?? null,
+            p_new_username: options.newUsername || null,
+            p_target_expiry: options.targetExpiry || null
+        };
         let data;
         try {
-            data = await callRpc('create_bit_task', {
-                p_action: action,
-                p_source_record_id: String(record.id),
-                p_request_id: requestId,
-                p_target_window_count: options.targetWindowCount ?? null,
-                p_new_username: options.newUsername || null,
-                p_target_expiry: options.targetExpiry || null
-            });
+            data = await callRpc('create_bit_task', rpcPayload);
+            if (!data?.ok && String(data?.code || '') === 'NO_CONNECTOR_SCOPE') {
+                const decision = await chooseAdminTaskRoute(record, action);
+                if (!decision) {
+                    const cancelled = new Error('管理员已取消连接器指派。');
+                    cancelled.code = 'ADMIN_ROUTE_CANCELLED';
+                    throw cancelled;
+                }
+                if (decision === '__web_only__') {
+                    const confirmed = await showActionConfirm(
+                        `确定只处理网页中的“${record.username || '-'}”？\n\n此操作不会修改 BitBrowser，可能导致网页与 BitBrowser 状态不一致，并会写入管理员操作日志。`,
+                        { title: '仅网页处理确认', confirmText: '确认仅处理网页', danger: true }
+                    );
+                    if (!confirmed) {
+                        const cancelled = new Error('管理员已取消仅网页处理。');
+                        cancelled.code = 'ADMIN_ROUTE_CANCELLED';
+                        throw cancelled;
+                    }
+                    data = await callRpc('admin_apply_web_only_action_v2', rpcPayload);
+                } else {
+                    data = await callRpc('admin_assign_connector_and_create_task_v2', {
+                        ...rpcPayload,
+                        p_connector_id: String(decision)
+                    });
+                    if (data?.ok) {
+                        try { await syncConnectorsV2(true); } catch (_) {}
+                    }
+                }
+            }
         } catch (error) {
+            if (error?.code === 'ADMIN_ROUTE_CANCELLED') localStorage.removeItem(requestKey);
             throw error;
         }
         if (!data?.ok) {
@@ -5430,7 +5545,13 @@ function showLoading(s, options = {}) {
             throw error;
         }
         localStorage.removeItem(requestKey);
-        const task = rememberTask({
+        if (data.user) applyUserRow(mapUserRow(data.user, record));
+        const task = data.webOnly ? {
+            id: `admin-web-only:${requestId}`,
+            status: 'resolved', action, username: record.username,
+            sourceRecordId: String(record.id), sourceOwner: String(record.owner || pageOwner()),
+            webOnly: true, updatedAt: new Date().toISOString()
+        } : rememberTask({
             ...(data.task || {}),
             sourceRecordId: String(record.id),
             sourceOwner: String(record.owner || pageOwner()),
@@ -5442,15 +5563,17 @@ function showLoading(s, options = {}) {
             operatedAt: new Date().toISOString(),
             syncSource: `bit_task:${String(task?.id || requestId)}`
         };
-        if (action === 'disable') {
-            recordOperationAudit(record, 'trash', taskAuditDetails);
-        } else if (action === 'delete') {
-            recordOperationAudit(record, 'permanent_delete', taskAuditDetails);
-        } else if (action === 'rename') {
-            recordOperationAudit({ ...record, username: options.newUsername || record.username }, 'rename', taskAuditDetails);
+        if (!task.webOnly) {
+            if (action === 'disable') {
+                recordOperationAudit(record, 'trash', taskAuditDetails);
+            } else if (action === 'delete') {
+                recordOperationAudit(record, 'permanent_delete', taskAuditDetails);
+            } else if (action === 'rename') {
+                recordOperationAudit({ ...record, username: options.newUsername || record.username }, 'rename', taskAuditDetails);
+            }
         }
         bitIntegrationAvailable = true;
-        bitIntegrationMessage = data.reused ? '已确认现有任务，等待连接器处理' : '任务已写入云端，等待连接器处理';
+        bitIntegrationMessage = data.webOnly ? '管理员已仅处理网页记录' : (data.reused ? '已确认现有任务，等待连接器处理' : '任务已写入云端，等待连接器处理');
         if (typeof refreshBitTaskBadge === 'function') refreshBitTaskBadge();
         if (!options.skipUserSync) {
             try {
@@ -5517,26 +5640,33 @@ function showLoading(s, options = {}) {
         ) || null;
     };
 
-    globalThis.confirmManualExternalDelete = async (taskId, expectedUsername) => {
+    globalThis.resolveManualBitTask = async (taskId, resolution) => {
         const task = getTaskCache().find(item => String(item?.id || '') === String(taskId || ''));
         const record = task ? findRecord(task.sourceRecordId || task.source_record_id) : null;
-        const username = String(expectedUsername || record?.username || task?.username || '').trim();
-        if (!task || !record || task.status !== 'needs_attention' || task.action !== 'delete') {
+        const username = String(task?.username || record?.username || '').trim();
+        if (!task || task.status !== 'needs_attention' || !['completed', 'abandoned'].includes(String(resolution || ''))) {
             alert('这条任务已变化，请先刷新后重试。');
             return false;
         }
-        if (!(await showActionConfirm(
-            `仅在你已从 BitBrowser 手工删除员工号「${username}」及其全部窗口后确认。\n\n确认后网页账号会永久删除，原任务保留为“已解决”审计记录。`,
-            { title: '确认手工删除结果', confirmText: '确认已手工删除', danger: true }
-        ))) return false;
+        const actionLabel = BIT_ACTION_LABELS[task.action] || task.action || '联动任务';
+        const completed = resolution === 'completed';
+        const message = completed
+            ? `仅在你已在 BitBrowser 中人工完成“${actionLabel}”后确认。\n\n员工号：${username}\n确认后网页会按该任务的目标状态收口，原任务保留为“已解决”。`
+            : `确定放弃“${username}”的“${actionLabel}”任务？\n\n网页当前业务状态保持不变，只解除任务占用；BitBrowser 不会被再次操作。`;
+        if (!(await showActionConfirm(message, {
+            title: completed ? '确认已人工完成' : '放弃任务确认',
+            confirmText: completed ? '已人工完成' : '确认放弃',
+            danger: !completed
+        }))) return false;
         showLoading(true, { blocking: false });
         try {
-            const data = await callRpc('confirm_manual_delete_v2', {
+            const data = await callRpc('resolve_bit_task_manually_v2', {
                 p_task_id: String(task.id),
+                p_resolution: String(resolution),
                 p_expected_username: username
             });
             if (!data?.ok) throw new Error(taskErrorText(data?.code));
-            if (!data.alreadyConfirmed) {
+            if (completed && task.action === 'delete' && record && !data.alreadyResolved) {
                 recordOperationAudit(record, 'permanent_delete', {
                     operatedAt: new Date().toISOString(),
                     syncSource: `bit_task:${String(task.id)}`
@@ -5546,15 +5676,18 @@ function showLoading(s, options = {}) {
             render();
             if (typeof renderTrash === 'function') renderTrash();
             if (typeof renderBitIntegration === 'function') renderBitIntegration();
-            alert(data.alreadyConfirmed ? '该手工删除结果此前已经确认。' : '网页账号已删除；原任务已保留为“已解决”。');
+            alert(data.alreadyResolved ? '该任务此前已经处理。' : (completed ? '已记录为人工完成，网页状态已同步收口。' : '任务已放弃并解除占用。'));
             return true;
         } catch (error) {
-            alert(`确认手工删除失败：\n${error.message || error}`);
+            alert(`人工处理任务失败：\n${error.message || error}`);
             return false;
         } finally {
             showLoading(false);
         }
     };
+
+    globalThis.confirmManualExternalDelete = async (taskId, _expectedUsername) =>
+        globalThis.resolveManualBitTask(taskId, 'completed');
 
     globalThis.loadBitTasksFromCloud = async () => {
         try { return await loadTasksV2(); }
@@ -5898,8 +6031,8 @@ function showLoading(s, options = {}) {
         if (typeof newlyActivatedId !== 'undefined') newlyActivatedId = String(id);
         render();
         try {
-            await createTask(record, 'recover', { targetExpiry, skipUserSync: true });
-            if (typeof recordOperationLog === 'function') recordOperationLog(record, 'renew', {
+            const task = await createTask(record, 'recover', { targetExpiry, skipUserSync: true });
+            if (!task.webOnly && typeof recordOperationLog === 'function') recordOperationLog(record, 'renew', {
                 operatedAt: new Date().toISOString(), expiryBefore, expiryAfter: targetExpiry
             });
             render();
