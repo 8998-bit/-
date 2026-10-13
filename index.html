@@ -291,7 +291,7 @@
 
 <header class="header">
   <div style="display:flex; align-items:center">
-    <div class="logo">比特 <span style="font-size:0.7em;opacity:0.75">v0.0.6</span></div>
+    <div class="logo">比特 <span style="font-size:0.7em;opacity:0.75">v0.0.7</span></div>
     <span class="sync-info" id="syncStatus">连接中...</span>
   </div>
   <div style="display:flex; gap:8px;">
@@ -5141,8 +5141,8 @@ function showLoading(s, options = {}) {
     const taskErrorText = code => ({
         ACTIVE_TASK_EXISTS: '该账号已有其他任务，请等待其完成。',
         BLOCKED_BY_NEEDS_ATTENTION: '该账号有需要人工处理的任务，处理前不能创建新任务。',
-        NO_CONNECTOR_SCOPE: '没有连接器负责该账号，请先检查连接器前缀。',
-        AMBIGUOUS_CONNECTOR_SCOPE: '该账号同时命中多台连接器，请先修正连接器范围。',
+        NO_CONNECTOR_SCOPE: '该员工号未出现在任何联动工具的BitBrowser员工目录中。',
+        AMBIGUOUS_CONNECTOR_SCOPE: '该员工号同时出现在多台联动工具的BitBrowser员工目录中，请先清理重复账号。',
         CONNECTOR_DISABLED_OR_MISSING: '选择的连接器已停用或不存在，请刷新后重试。',
         CONNECTOR_SCOPE_CHANGED: '该账号的连接器归属已变化，请刷新后重试。',
         NOT_IN_NEEDS_ATTENTION: '该任务已不是需人工处理状态，请刷新。',
@@ -5499,32 +5499,7 @@ function showLoading(s, options = {}) {
         try {
             data = await callRpc('create_bit_task', rpcPayload);
             if (!data?.ok && String(data?.code || '') === 'NO_CONNECTOR_SCOPE') {
-                const decision = await chooseAdminTaskRoute(record, action);
-                if (!decision) {
-                    const cancelled = new Error('管理员已取消连接器指派。');
-                    cancelled.code = 'ADMIN_ROUTE_CANCELLED';
-                    throw cancelled;
-                }
-                if (decision === '__web_only__') {
-                    const confirmed = await showActionConfirm(
-                        `确定只处理网页中的“${record.username || '-'}”？\n\n此操作不会修改 BitBrowser，可能导致网页与 BitBrowser 状态不一致，并会写入管理员操作日志。`,
-                        { title: '仅网页处理确认', confirmText: '确认仅处理网页', danger: true }
-                    );
-                    if (!confirmed) {
-                        const cancelled = new Error('管理员已取消仅网页处理。');
-                        cancelled.code = 'ADMIN_ROUTE_CANCELLED';
-                        throw cancelled;
-                    }
-                    data = await callRpc('admin_apply_web_only_action_v2', rpcPayload);
-                } else {
-                    data = await callRpc('admin_assign_connector_and_create_task_v2', {
-                        ...rpcPayload,
-                        p_connector_id: String(decision)
-                    });
-                    if (data?.ok) {
-                        try { await syncConnectorsV2(true); } catch (_) {}
-                    }
-                }
+                data = await callRpc('admin_apply_web_only_action_v2', rpcPayload);
             }
         } catch (error) {
             if (error?.code === 'ADMIN_ROUTE_CANCELLED') localStorage.removeItem(requestKey);
