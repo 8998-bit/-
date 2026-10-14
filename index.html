@@ -291,7 +291,7 @@
 
 <header class="header">
   <div style="display:flex; align-items:center">
-    <div class="logo">比特 <span style="font-size:0.7em;opacity:0.75">v0.0.8</span></div>
+    <div class="logo">比特 <span style="font-size:0.7em;opacity:0.75">v0.0.9</span></div>
     <span class="sync-info" id="syncStatus">连接中...</span>
   </div>
   <div style="display:flex; gap:8px;">
@@ -456,7 +456,7 @@
 <div class="modal-overlay" id="multiUnusedModal">
   <div class="modal">
     <h3 style="font-size:14px; margin-bottom:10px; color:var(--unused)">批量新增名额</h3>
-    <textarea id="multiUnusedInput" style="width:100%; height:180px; background:#000; border:1px solid var(--border); color:#fff; padding:10px; font-size:12px" placeholder="用户名 密码 窗口数 (一行一个，窗口数填 50 或 100，不填默认 100)"></textarea>
+    <textarea id="multiUnusedInput" style="width:100%; height:180px; background:#000; border:1px solid var(--border); color:#fff; padding:10px; font-size:12px" placeholder="用户名 | 密码 | 窗口数（支持空格、Tab、| 或 ｜ 分隔；窗口数填 50 或 100）"></textarea>
     <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:15px">
       <button class="btn btn-ghost" onclick="closeModal('multiUnusedModal')">取消</button>
       <button class="btn btn-secondary" onclick="confirmMultiUnused()" style="background:var(--unused)">确认添加</button>
@@ -543,7 +543,7 @@
 
 <script>
 // ================== 核心配置 ==================
-const SUPABASE_URL = 'https://xlmnfzocrlqvbzzrdshr.supabase.co';const APP_VERSION = '0.0.8'; // 🏷 版本号：改版本时递增（左上角显示） 
+const SUPABASE_URL = 'https://xlmnfzocrlqvbzzrdshr.supabase.co';const APP_VERSION = '0.0.9'; // 🏷 版本号：改版本时递增（左上角显示） 
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhsbW5mem9jcmxxdmJ6enJkc2hyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ5ODMyMjAsImV4cCI6MjA5MDU1OTIyMH0.Pvhl7JTz-FmOZ6J_aT8kBRve3ZrjOIIVVekr4jTZXUM';
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const STORAGE_KEY = 'uf_v45_db:main';
@@ -4783,6 +4783,12 @@ function importExcel(input) {
 
 function downloadTemplate() { const ws = XLSX.utils.aoa_to_sheet([["归属","窗口数", "用户名", "密码", "微信", "咸鱼", "激活时间", "金额", "到期日期"]]); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "模版"); XLSX.writeFile(wb, "导入模版.xlsx"); }
 function exportSelected() { const ids = Array.from(document.querySelectorAll(`.user-cb:checked`)).map(cb => cb.dataset.id); const ws = XLSX.utils.json_to_sheet(db.users.filter(u => ids.includes(u.id)).map(u => ({"归属": u.owner, "窗口数": u.windows, "用户名": u.username, "密码": u.password, "微信": u.wechat, "咸鱼": u.xianyu, "激活时间": u.activeTime, "金额": u.amount, "到期日期": u.expiry}))); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "导出"); XLSX.writeFile(wb, `用户导出_${Date.now()}.xlsx`); }
+function parseMultiUnusedLine(line) {
+    const text = String(line || '').trim();
+    if (!text) return [];
+    if (/[|｜]/.test(text)) return text.split(/[|｜]/).map(value => value.trim());
+    return text.split(/\s+/);
+}
 async function confirmMultiUnused() {
     const rawInput = document.getElementById('multiUnusedInput').value;
     const lines = rawInput.split('\n').filter(line => line.trim());
@@ -4791,7 +4797,7 @@ async function confirmMultiUnused() {
     const toAdd = [];
     const seenInInput = new Set();
     lines.forEach(line => {
-        const p = line.trim().split(/\s+/);
+        const p = parseMultiUnusedLine(line);
         const uname = p[0];
         if (!uname) return;
         if (!isUsernameUnique(uname) || seenInInput.has(uname.toLowerCase())) {
