@@ -291,7 +291,7 @@
 
 <header class="header">
   <div style="display:flex; align-items:center">
-    <div class="logo">比特 <span style="font-size:0.7em;opacity:0.75">v0.0.7</span></div>
+    <div class="logo">比特 <span style="font-size:0.7em;opacity:0.75">v0.0.8</span></div>
     <span class="sync-info" id="syncStatus">连接中...</span>
   </div>
   <div style="display:flex; gap:8px;">
@@ -543,7 +543,7 @@
 
 <script>
 // ================== 核心配置 ==================
-const SUPABASE_URL = 'https://xlmnfzocrlqvbzzrdshr.supabase.co';const APP_VERSION = '0.0.6'; // 🏷 版本号：改版本时递增（左上角显示） 
+const SUPABASE_URL = 'https://xlmnfzocrlqvbzzrdshr.supabase.co';const APP_VERSION = '0.0.8'; // 🏷 版本号：改版本时递增（左上角显示） 
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhsbW5mem9jcmxxdmJ6enJkc2hyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ5ODMyMjAsImV4cCI6MjA5MDU1OTIyMH0.Pvhl7JTz-FmOZ6J_aT8kBRve3ZrjOIIVVekr4jTZXUM';
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const STORAGE_KEY = 'uf_v45_db:main';
@@ -1379,6 +1379,18 @@ function connectorPrefixes(connector) {
 function connectorManualAccounts(connector) {
     if (Array.isArray(connector?.manualAccounts)) return connector.manualAccounts.map(String).map(x => x.trim()).filter(Boolean);
     return String(connector?.manualAccountText || '').split(/[,，]+/).map(x => x.trim()).filter(Boolean);
+}
+
+function connectorScopeLabel(connector) {
+    const routingMode = String(connector?.routingMode || connector?.routing_mode || '').toLowerCase();
+    if (routingMode === 'inventory') {
+        const count = Number(connector?.inventoryCount ?? connector?.inventory_count);
+        return `员工目录：${Number.isFinite(count) ? count : '--'} 个`;
+    }
+    return [
+        connectorPrefixes(connector).join(','),
+        connectorManualAccounts(connector).length ? `指定：${connectorManualAccounts(connector).join(',')}` : ''
+    ].filter(Boolean).join('；') || '未配置';
 }
 
 function connectorRetentionReferenceMs(connector) {
@@ -2409,9 +2421,7 @@ function renderBitIntegration() {
 
 async function refreshBitIntegrationLight() {
     const now = Date.now();
-    bitConnectorRoutes = activeConnectors.filter(connector =>
-        connectorPrefixes(connector).length || connectorManualAccounts(connector).length
-    ).map(connector => {
+    bitConnectorRoutes = activeConnectors.map(connector => {
             // P3-C: 在线判定优先用心跳表（联动工具最近上报），无则退回连接器对象上的时间
             const _beatRow = (typeof connectorHeartbeatById !== 'undefined') ? connectorHeartbeatById.get(String(connector.id || '')) : null;
             const lastSeen = (_beatRow && (_beatRow.last_seen || _beatRow.lastSeen)) || connector.lastSeen || connector.last_seen || null;
@@ -2419,10 +2429,7 @@ async function refreshBitIntegrationLight() {
         return {
             connector_id: connector.id,
             display_name: connector.displayName || connector.display_name || '未命名连接器',
-            account_prefix: [
-                connectorPrefixes(connector).join(','),
-                connectorManualAccounts(connector).length ? `指定：${connectorManualAccounts(connector).join(',')}` : ''
-            ].filter(Boolean).join('；') || '未配置',
+            account_prefix: connectorScopeLabel(connector),
             last_seen: lastSeen,
             online: connector.enabled !== false && Number.isFinite(seenAt) && now - seenAt < BIT_CONNECTOR_OFFLINE_MS
         };
@@ -2497,18 +2504,13 @@ async function refreshBitIntegration(silent = true) {
         }
         changed = _changedCollect || _changedRegistry || _changedSuperseded || _changedRoute;
         const now = Date.now();
-        bitConnectorRoutes = activeConnectors.filter(connector =>
-            connectorPrefixes(connector).length || connectorManualAccounts(connector).length
-        ).map(connector => {
+        bitConnectorRoutes = activeConnectors.map(connector => {
             const lastSeen = connector.lastSeen || connector.last_seen || null;
             const seenAt = lastSeen ? new Date(lastSeen).getTime() : 0;
             return {
                 connector_id: connector.id,
                 display_name: connector.displayName || connector.display_name || '未命名连接器',
-                account_prefix: [
-                    connectorPrefixes(connector).join(','),
-                    connectorManualAccounts(connector).length ? `指定：${connectorManualAccounts(connector).join(',')}` : ''
-                ].filter(Boolean).join('；') || '未配置',
+                account_prefix: connectorScopeLabel(connector),
                 last_seen: lastSeen,
                 online: connector.enabled !== false && Number.isFinite(seenAt) && now - seenAt < BIT_CONNECTOR_OFFLINE_MS
             };
@@ -5399,6 +5401,8 @@ function showLoading(s, options = {}) {
             accountPrefix: String(row.accountPrefix || row.account_prefix || ''),
             prefixes: Array.isArray(row.prefixes) ? row.prefixes.map(String) : [],
             manualAccounts: Array.isArray(row.manualAccounts) ? row.manualAccounts.map(String) : [],
+            routingMode: String(row.routingMode || row.routing_mode || ''),
+            inventoryCount: row.inventoryCount ?? row.inventory_count ?? null,
             enabled: row.enabled !== false,
             lastSeen: row.lastSeen || row.last_seen || null,
             updatedAt: row.usageUpdatedAt || row.updated_at || null
